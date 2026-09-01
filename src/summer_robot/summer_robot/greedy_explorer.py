@@ -50,7 +50,7 @@ ROBOT_FRAME = 'base_footprint'  # 機器人中心座標系
 
 # --- Frontier (邊界) 偵測參數 ---
 FRONTIER_MIN_SIZE       = 8     # 最小 Frontier 群集大小 [cells] (過濾掉太小的雜訊)
-FRONTIER_SEARCH_RADIUS  = 600   # 從機器人往外搜尋的最大半徑 [cells]，600 * 0.05m = 30m (設定夠大才能看遍全圖)
+FRONTIER_SEARCH_RADIUS  = 1200  # 從機器人往外搜尋的最大半徑 [cells]，1200 * 0.05m = 60m (使用者要求)
 FRONTIER_REACH_DISTANCE = 0.4   # 距 Frontier 質心此距離內即視為「到達」[m] (設定較小以逼迫機器人靠近邊角)
 
 # --- Frontier 黑名單 (防幽靈邊界卡死機制) ---
@@ -64,7 +64,7 @@ RRT_STEP_SIZE            = 0.25  # 每次樹枝延伸的步長 [m]
 RRT_GOAL_BIAS            = 0.20  # 直接朝目標點採樣的機率 (0~1)，提高收斂速度
 RRT_GOAL_THRESHOLD       = 0.20  # 距離目標多近視為規劃成功 [m]
 RRT_COLLISION_CHECK_STEP = 0.04  # 兩點間碰撞檢查的插值步長 [m]
-INFLATION_RADIUS         = 0.25  # 地圖障礙物膨脹半徑 [m]，確保 RRT 規劃出來的路線離牆壁有安全距離
+INFLATION_RADIUS         = 0.20  # 地圖障礙物膨脹半徑 [m]，配合較小的斥力，允許穿過狹窄區域
 
 # --- PID 移動控制參數 (結合 APF 使用) ---
 MAX_LINEAR_VEL   = 0.18   # 最大前進線速度 [m/s]
@@ -74,10 +74,7 @@ ANGULAR_KP       = 1.8    # 轉向的 P 控制器增益
 LINEAR_KP        = 0.5    # 前進的 P 控制器增益
 WAYPOINT_SKIP_AHEAD = 4   # 循跡時，往前方幾個路徑點看(Look-ahead)，讓走線更平順
 
-# --- LiDAR 安全急煞守衛 ---
-# 保護機制，當雷達偵測到過近的物體時強制煞停。此距離必須小於 INFLATION_RADIUS，避免與演算法互相衝突。
-LIDAR_SAFE_DISTANCE = 0.18   # 前方安全距離 [m]
-LIDAR_FRONT_ANGLE   = 30.0   # 偵測前方危險的扇形半角 [度] (正前方左右各 30 度)
+
 
 # --- 計算量卸載 ---
 OFFLOAD_ENABLED = False   # 是否將 RRT 計算卸載到 PC 端 (Gazebo 預設在本機計算即可)
@@ -87,10 +84,7 @@ PLAN_COOLDOWN   = 2.0     # 重新規劃路線的最小冷卻時間 [s]
 STUCK_INTERVAL  = 6.0    # 偵測卡住的時間區間 [s]
 STUCK_THRESHOLD = 0.05   # 在該區間內位移小於此值 [m]，則視為卡住
 
-# --- 急煞升級機制 ---
-# 第一次雷達急煞：放棄當前 Frontier，讓 exploration_loop 改選距離更遠的下一個目標。
-# 連續急煞達到此閾值：直接將 Frontier 加入黑名單，跳過更遠的目標再繼續探索。
-EMERGENCY_BLACKLIST_THRESHOLD = 2  # 連續急煞幾次後才加入黑名單
+
 
 
 class RRTNode:
@@ -154,7 +148,7 @@ def find_nearest_safe_free_goal(
     map_data: MapData,
     fx: float, fy: float,
     inflated_map: np.ndarray,
-    max_search_radius: int = 40
+    max_search_radius: int = 200
 ) -> Optional[Tuple[float, float]]:
     """
     因為 Frontier(未知邊界) 通常落在未知空間，RRT 無法直接連到未知的網格上。
@@ -367,21 +361,6 @@ def smooth_path(
     return smoothed
 
 
-def check_lidar_obstacle(scan: LaserScan) -> bool:
-    """檢查雷達正前方是否有距離過近的障礙物，用於緊急煞停"""
-    if not scan.ranges:
-        return False
-    front_angle_rad = math.radians(LIDAR_FRONT_ANGLE)
-    two_pi = 2.0 * math.pi
-    for i, r in enumerate(scan.ranges):
-        if math.isnan(r) or math.isinf(r) or r < scan.range_min or r > scan.range_max:
-            continue
-        angle = scan.angle_min + i * scan.angle_increment
-        if angle < front_angle_rad or angle > (two_pi - front_angle_rad):
-            if r < LIDAR_SAFE_DISTANCE:
-                return True
-    return False
-
 # ─────────────────────────────────────────────────────────────────
 # 模組 5：APF (人工勢場法) 移動控制器
 # ─────────────────────────────────────────────────────────────────
@@ -389,7 +368,7 @@ def check_lidar_obstacle(scan: LaserScan) -> bool:
 # --- APF 專用參數 ---
 APF_K_ATT        = 1.5    # 目標點引力增益 (越大越急著往目標走)
 APF_K_REP        = 0.05   # 障礙物斥力增益 (越大遇到障礙彈開越遠)
-APF_MAX_OBS_DIST = 0.40   # 斥力場作用半徑 [m] (雷達距離大於此值的障礙物不產生斥力)
+APF_MAX_OBS_DIST = 0.30   # 斥力場作用半徑 [m] (雷達距離大於此值的障礙物不產生斥力)
 APF_LIDAR_STEP   = 15     # 降採樣雷達資訊的度數 (一圈360度，每15度取一個點，共24點)
 
 class APFMotionController:
@@ -492,10 +471,13 @@ class APFMotionController:
                     angle_rad = scan.angle_min + i * scan.angle_increment
                     angle_robot = (angle_rad + math.pi) % (2*math.pi) - math.pi
                     
-                    # 勢場公式：越近斥力呈指數型暴增
-                    f_mag = APF_K_REP * (1.0/r - 1.0/APF_MAX_OBS_DIST) / (r**2)
-                    f_rep_x += -f_mag * math.cos(angle_robot)
-                    f_rep_y += -f_mag * math.sin(angle_robot)
+                    # 【防轉圈圈機制】只對前方 140 度 (正負 70 度) 的障礙物產生斥力
+                    # 側邊平行的牆壁不會產生側向推力，避免狹窄走廊內左右搖擺轉圈
+                    if abs(angle_robot) < math.radians(70):
+                        # 勢場公式：越近斥力呈指數型暴增
+                        f_mag = APF_K_REP * (1.0/r - 1.0/APF_MAX_OBS_DIST) / (r**2)
+                        f_rep_x += -f_mag * math.cos(angle_robot)
+                        f_rep_y += -f_mag * math.sin(angle_robot)
 
         # 3. 合成最終向量
         f_tot_x = f_att_x + f_rep_x
@@ -585,10 +567,6 @@ class RobotNode(Node):
         # 黑名單儲存器: list of (x, y, timestamp)
         self.blacklisted_frontiers: List[Tuple[float, float, float]] = []
         
-        # 急煞計數器：記錄對每個 Frontier（量化鍵）連續觸發雷達急煞的次數
-        # 格式：{(round_x, round_y): count}，超過 EMERGENCY_BLACKLIST_THRESHOLD 才加黑名單
-        self._emergency_stop_counts: dict = {}
-
         self._stuck_last_time = time.time()
         self._stuck_last_pos  = (0.0, 0.0)
 
@@ -620,6 +598,8 @@ class RobotNode(Node):
         path = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         self.motion_ctrl.set_path(path)
         self.is_exploring = True
+        self._stuck_last_time = time.time()
+        self._stuck_last_pos = (self.robot_x, self.robot_y)
         self.get_logger().info(f'[路徑] 收到 {len(path)} 個路徑點')
 
     def _update_pose_from_tf(self) -> bool:
@@ -650,39 +630,9 @@ class RobotNode(Node):
         if not self._update_pose_from_tf():
             return
 
-        # 雷達安全急煞機制（升級版：首次跳過，連續才加黑名單）
+        # 將最新的雷達資料交給 APF 計算斥力
         if self.latest_scan is not None:
             self.motion_ctrl.set_scan(self.latest_scan)
-            if check_lidar_obstacle(self.latest_scan):
-                self.motion_ctrl.emergency_stop()
-                self.is_exploring = False
-
-                if self.current_frontier is not None:
-                    # 用量化座標 (0.5m 精度) 作為計數器的 key，避免因浮點數差異重複計數
-                    key = (round(self.current_frontier[0] * 2) / 2,
-                           round(self.current_frontier[1] * 2) / 2)
-                    self._emergency_stop_counts[key] = self._emergency_stop_counts.get(key, 0) + 1
-                    count = self._emergency_stop_counts[key]
-
-                    if count >= EMERGENCY_BLACKLIST_THRESHOLD:
-                        # 連續急煞達閾值：直接加黑名單，exploration_loop 會跳到更遠的 Frontier
-                        self.get_logger().warn(
-                            f'[急煞升級] Frontier ({self.current_frontier[0]:.2f}, {self.current_frontier[1]:.2f}) '
-                            f'連續急煞 {count} 次，加入黑名單'
-                        )
-                        self.blacklisted_frontiers.append(
-                            (self.current_frontier[0], self.current_frontier[1], now)
-                        )
-                        del self._emergency_stop_counts[key]  # 清除計數，避免黑名單到期後立刻再累積
-                    else:
-                        # 第一次急煞：只放棄當前 Frontier，讓 exploration_loop 改選下一個更遠的目標
-                        self.get_logger().warn(
-                            f'[急煞] 放棄當前 Frontier，改選下一個目標 (第 {count} 次，閾值 {EMERGENCY_BLACKLIST_THRESHOLD})'
-                        )
-
-                    # 無論如何都清空當前 Frontier，確保 exploration_loop 重新選目標
-                    self.current_frontier = None
-                return
 
         if not self.is_exploring:
             return
@@ -701,10 +651,7 @@ class RobotNode(Node):
                 # 若雷達被牆壁擋住照不出來，這招能強制放棄它，打破卡死無限迴圈！
                 self.blacklisted_frontiers.append((self.current_frontier[0], self.current_frontier[1], now))
                 
-                # 成功抵達後清除此點的急煞計數，避免下次重訪時沿用舊計數
-                key = (round(self.current_frontier[0] * 2) / 2,
-                       round(self.current_frontier[1] * 2) / 2)
-                self._emergency_stop_counts.pop(key, None)
+
 
                 self.motion_ctrl.stop()
                 self.is_exploring     = False
@@ -715,7 +662,10 @@ class RobotNode(Node):
         path_done = self.motion_ctrl.update(self.robot_x, self.robot_y, self.robot_yaw)
         if path_done:
             self.is_exploring = False
-            self.current_frontier = None
+            if self.current_frontier is not None:
+                self.get_logger().warn('[黑名單] 路徑結束但未達邊界(可能被阻擋)，加入黑名單避免無限重試')
+                self.blacklisted_frontiers.append((self.current_frontier[0], self.current_frontier[1], time.time()))
+                self.current_frontier = None
 
         self._check_stuck()
 
@@ -765,15 +715,28 @@ class RobotNode(Node):
             blacklist=[(f[0], f[1]) for f in self.blacklisted_frontiers]
         )
 
-        # 如果連黑名單外的邊界都找不到了，就認定探索完成
+        # 如果連黑名單外的邊界都找不到了
         if not frontiers:
-            self.get_logger().info('[探索] 找不到有效 Frontier，探索完成！')
-            self.exploration_done = True
-            self.motion_ctrl.stop()
-            self.status_pub.publish(String(data='EXPLORATION_COMPLETE'))
-            return
+            if len(self.blacklisted_frontiers) > 0:
+                self.get_logger().info('[探索] 所有剩餘 Frontier 都在黑名單中，原地等待地圖更新或黑名單解除...')
+                self.motion_ctrl.stop()
+                return
+            else:
+                self.get_logger().info(f'[探索] 找不到有效 Frontier (黑名單數: {len(self.blacklisted_frontiers)})，探索完成！')
+                self.exploration_done = True
+                self.motion_ctrl.stop()
+                self.status_pub.publish(String(data='EXPLORATION_COMPLETE'))
+                return
 
         inflated_map = map_data.get_inflated_map(INFLATION_RADIUS)
+        
+        # 清除機器人當前位置周圍的膨脹，確保 RRT 不會因為起點在膨脹區內而直接失敗 (解決停頓 17 秒問題)
+        mx, my = map_data.world_to_map(self.robot_x, self.robot_y)
+        clear_r = max(1, int(INFLATION_RADIUS / map_data.resolution))
+        for dy in range(-clear_r, clear_r + 1):
+            for dx in range(-clear_r, clear_r + 1):
+                if 0 <= mx+dx < map_data.width and 0 <= my+dy < map_data.height:
+                    inflated_map[my+dy, mx+dx] = 0
 
         # 依設定決定是在本機算 RRT 還是拋給 PC 算
         if OFFLOAD_ENABLED:
@@ -801,6 +764,8 @@ class RobotNode(Node):
                 if math.sqrt((gx - self.robot_x)**2 + (gy - self.robot_y)**2) < GOAL_TOLERANCE:
                     self.current_frontier = (fx, fy)
                     self.is_exploring = True
+                    self._stuck_last_time = time.time()
+                    self._stuck_last_pos = (self.robot_x, self.robot_y)
                     return
 
                 # 開始本機 RRT 規劃
@@ -816,6 +781,8 @@ class RobotNode(Node):
                 self.motion_ctrl.set_path(smooth)
                 self.current_frontier = (fx, fy)
                 self.is_exploring = True
+                self._stuck_last_time = time.time()
+                self._stuck_last_pos = (self.robot_x, self.robot_y)
                 self.get_logger().info(f'[探索] ✓ 本機規劃成功，前往 ({fx:.2f}, {fy:.2f})')
                 return
 
@@ -892,6 +859,14 @@ class PCComputeServer(Node):
             self.get_logger().info(f'[PC] 開始為目標 ({goal_fx:.2f}, {goal_fy:.2f}) 規劃路徑...')
             map_data = MapData(self.current_map)
             inflated_map = map_data.get_inflated_map(INFLATION_RADIUS)
+
+            # 清除機器人當前位置周圍的膨脹，確保 RRT 不會因為起點在膨脹區內而直接失敗
+            mx, my = map_data.world_to_map(robot_x, robot_y)
+            clear_r = max(1, int(INFLATION_RADIUS / map_data.resolution))
+            for dy in range(-clear_r, clear_r + 1):
+                for dx in range(-clear_r, clear_r + 1):
+                    if 0 <= mx+dx < map_data.width and 0 <= my+dy < map_data.height:
+                        inflated_map[my+dy, mx+dx] = 0
 
             goal = find_nearest_safe_free_goal(map_data, goal_fx, goal_fy, inflated_map)
             if not goal:
