@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'greedy_explorer = summer_robot.greedy_explorer:main'
+            'greedy_explorer = summer_robot.explorer_node:main'
         ],
     },
 )
