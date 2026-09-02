@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 from typing import List, Optional, Tuple
 
 from nav_msgs.msg import OccupancyGrid
@@ -22,9 +23,9 @@ class ExplorerNode(Node):
         self.get_logger().info("Launching Nav2 auto explore node")
 
         # 宣告參數與預設值
-        self.declare_parameter("min_size", 4)
+        self.declare_parameter("min_size", 3)          # 配合新版演算法微調預設值
         self.declare_parameter("search_radius", 800)
-        self.declare_parameter("ignore_radius", 0.5)
+        self.declare_parameter("ignore_radius", 1.5)   # 放大死巷黑名單半徑
         self.declare_parameter("inflation_radius", 0.22)
         self.declare_parameter("decision_rate", 1.0)
 
@@ -43,6 +44,7 @@ class ExplorerNode(Node):
         self.current_map_data: Optional[MapData] = None
         self.visited_list: List[Tuple[float, float]] = []
         self.unreachable_list: List[Tuple[float, float]] = []
+        self.current_target: Optional[Tuple[float, float]] = None  # 新增：追蹤當前目標
         self.exploration_done = False
 
         # 給予 10 次容錯緩衝 (約 10 秒)，避免開機地圖未成形直接退出
@@ -67,18 +69,31 @@ class ExplorerNode(Node):
     def _on_map(self, msg: OccupancyGrid):
         self.current_map_data = MapData(msg)
 
-    def _get_robot_pose(self) -> Tuple[Optional[float], Optional[float]]:
+    def _get_robot_pose(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        # 修改：同步回傳車體朝向 (Yaw)，讓演算法產生轉向懲罰
         try:
             tf = self.tf_buffer.lookup_transform("map", "base_footprint", rclpy.time.Time())
-            return tf.transform.translation.x, tf.transform.translation.y
+            x = tf.transform.translation.x
+            y = tf.transform.translation.y
+            q = tf.transform.rotation
+            # Quaternion 轉 Euler Yaw
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            return x, y, yaw
         except TransformException:
-            return None, None
+            return None, None, None
 
     def _on_navigation_finished(self, success: bool, goal: Tuple[float, float]):
+        self.current_target = None  # 導航結束，清除目標鎖定
+        
         if success:
             self.visited_list.append(goal)
         else:
             self.unreachable_list.append(goal)
+            self.get_logger().warn(f"[Explore] Nav failed, blacklisting target: {goal}")
+            
+            # 新增：限制黑名單長度，避免無效點堆積吃效能或永久鎖死
+            if len(self.unreachable_list) > 30:
+                self.unreachable_list.pop(0)
 
     def _step(self):
         if self.exploration_done or self.controller.is_navigating:
@@ -88,7 +103,7 @@ class ExplorerNode(Node):
             self.get_logger().warn("[Explore] waiting for /map building")
             return 
 
-        rx, ry = self._get_robot_pose()
+        rx, ry, ryaw = self._get_robot_pose()
         if rx is None:
             self.get_logger().warn("[Explore] wait for TF (map -> base_footprint)...")
             return
@@ -101,10 +116,13 @@ class ExplorerNode(Node):
         unknown_cells = np.sum(grid < 0)
         self.get_logger().info(f"[Map] Size: {self.current_map_data.width}x{self.current_map_data.height} | Free: {free_cells} | Unknown: {unknown_cells}")
 
+        # 修改：傳入 robot_yaw 與 current_target
         candidates = self.detector.detect(
             self.current_map_data,
             rmx,
             rmy,
+            robot_yaw=ryaw,
+            current_target=self.current_target,
             visited_list=self.visited_list,
             unreachable_list=self.unreachable_list
         )
@@ -137,6 +155,8 @@ class ExplorerNode(Node):
             self.get_logger().warn("[Explore] Candidate has no safe point to navigate, waiting map to update...")
             return
 
+        # 紀錄鎖定目標並發送給 Nav2
+        self.current_target = safe_target
         self.controller.send_goal(safe_target[0], safe_target[1])
 
 
