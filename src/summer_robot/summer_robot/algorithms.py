@@ -166,14 +166,15 @@ class FrontierDetector:
             # 轉向懲罰
             target_angle = math.atan2(wy - robot_wy, wx - robot_wx)
             angle_diff = abs(math.atan2(math.sin(target_angle - robot_yaw), math.cos(target_angle - robot_yaw)))
-            heading_penalty = angle_diff * 1.2 
+            heading_penalty = angle_diff * 0.8
 
             # 目標黏滯性
             stickiness_bonus = 0.0
             if current_target is not None:
                 if math.hypot(wx - current_target[0], wy - current_target[1]) < 1.2:
-                    stickiness_bonus = -4.0  # 稍微加深黏滯權重，避免在途中無故甩掉好目標
+                    stickiness_bonus = -3.0
 
+            dist_cost = path_dist * 1.5
             cost = path_dist + heading_penalty - (unknown_gain * 0.05) + stickiness_bonus
             candidates.append((wx, wy, cost))
 
@@ -230,3 +231,7 @@ class FrontierDetector:
                     queue.append((ncx, ncy))
 
         return None
+
+
+
+

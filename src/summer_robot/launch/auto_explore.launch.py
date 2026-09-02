@@ -20,7 +20,7 @@ def generate_launch_description():
     nav2_params_file = os.path.join(pkg_summer_robot, 'config', 'nav2_params.yaml')
     explorer_params_file = os.path.join(pkg_summer_robot, 'config', 'explorer_params.yaml')
     
-    # 關鍵：指定讀取你自訂的帶相機 URDF
+    # 關鍵：指定讀取自訂的帶相機 URDF
     custom_urdf_file = os.path.join(pkg_summer_robot, 'urdf', 'turtlebot3_burger.urdf')
     robot_description = Command(['xacro ', custom_urdf_file])
 
@@ -65,7 +65,21 @@ def generate_launch_description():
         ]
     )
 
-    # 5. 延遲 15 秒啟動 Nav2
+    # 5. 【新增】：延遲 6 秒啟動地面視覺避障雷達節點（待相機出圖後進行地面校準）
+    ground_scanner_launch = TimerAction(
+        period=6.0,
+        actions=[
+            Node(
+                package='summer_robot',
+                executable='ground_scanner_node',
+                name='ground_scanner_node',
+                output='screen',
+                parameters=[{'use_sim_time': use_sim_time}]
+            )
+        ]
+    )
+
+    # 6. 延遲 15 秒啟動 Nav2
     nav2_launch = TimerAction(
         period=15.0,
         actions=[
@@ -79,7 +93,7 @@ def generate_launch_description():
         ]
     )
 
-    # 6. 延遲 22 秒啟動探索節點
+    # 7. 延遲 22 秒啟動探索節點
     explorer_node = TimerAction(
         period=22.0,
         actions=[
@@ -101,6 +115,7 @@ def generate_launch_description():
         robot_state_publisher,
         spawn_burger,
         cartographer_launch,
+        ground_scanner_launch,  # <--- 已加入
         nav2_launch,
         explorer_node
     ])

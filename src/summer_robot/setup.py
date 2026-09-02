@@ -30,7 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'explorer_node = summer_robot.explorer_node:main'
+            'explorer_node = summer_robot.explorer_node:main',
+            'ground_scanner_node = summer_robot.ground_scanner_node:main',
         ],
     },
 )
