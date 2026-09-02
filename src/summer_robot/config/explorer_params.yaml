@@ -1,0 +1,7 @@
+explorer_node:
+  ros__parameters:
+    min_size: 10
+    search_radius: 600
+    ignore_radius: 1.0
+    inflation_radius: 0.25
+    decision_rate: 1.0 # unit is Hz
