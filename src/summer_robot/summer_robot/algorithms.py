@@ -55,14 +55,15 @@ class MapData:
 
 class FrontierDetector:
     """
-    使用膨脹交集法偵測未探索邊界。
+    水滴擴散法 (Wavefront BFS) + 資訊增益代價評分 + 雙階段 Fallback 機制。
+    天然繞牆，優先探索開闊大廳，全圖探完後自動回頭補掃小角落。
     """
     def __init__(
         self, 
         min_size: int = 4,
         search_radius: int = 800,
         ignore_radius: float = 0.8,
-        min_distance_to_robot: float = 0.6  # 防卡死：太近的不選
+        min_distance_to_robot: float = 0.6  # 防原地抽搐：太近的不選
     ):
         self.min_size = min_size
         self.search_radius = search_radius
@@ -86,47 +87,107 @@ class FrontierDetector:
         robot_wx, robot_wy = map_data.map_to_world(robot_mx, robot_my)
 
         grid = map_data.data
-        free_mask = ((grid >= 0) & (grid < 50)).astype(np.uint8)
-        unknown_mask = (grid < 0).astype(np.uint8)
+        h, w = map_data.height, map_data.width
 
-        # 形態學交集找出邊界線
-        kernel = np.ones((5, 5), np.uint8)
-        free_dilated = cv2.dilate(free_mask, kernel, iterations=1)
-        frontier_raw = cv2.bitwise_and(free_dilated, unknown_mask)
+        if not (0 <= robot_mx < w and 0 <= robot_my < h):
+            return []
 
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            frontier_raw, connectivity=8
-        )
+        # -------------------------------------------------------------
+        # 1. 水滴擴散法 (BFS)：從機器人出發找可連通邊界
+        # -------------------------------------------------------------
+        visited_cells = np.zeros((h, w), dtype=bool)
+        frontier_points = []
 
-        candidates = []
-        for lid in range(1, num_labels):
-            area = stats[lid, cv2.CC_STAT_AREA]
-            if area < self.min_size:
+        start_x, start_y = robot_mx, robot_my
+        # 若機器人目前位置貼牆，周遭 3x3 尋找最近的安全空地當作水滴起點
+        if not (0 <= grid[start_y, start_x] < 50):
+            found_free = False
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    nx, ny = start_x + dx, start_y + dy
+                    if 0 <= nx < w and 0 <= ny < h and (0 <= grid[ny, nx] < 50):
+                        start_x, start_y = nx, ny
+                        found_free = True
+                        break
+                if found_free:
+                    break
+            if not found_free:
+                return []
+
+        queue = deque([(start_x, start_y, 0.0)])
+        visited_cells[start_y, start_x] = True
+
+        directions = [
+            (0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
+            (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414)
+        ]
+
+        while queue:
+            cx, cy, cur_dist = queue.popleft()
+
+            if cur_dist > self.search_radius:
                 continue
 
-            cx, cy = int(centroids[lid, 0]), int(centroids[lid, 1])
-            dist_cells = math.hypot(cx - robot_mx, cy - robot_my)
-            if dist_cells > self.search_radius:
-                continue
+            for dx, dy, step_cost in directions:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < w and 0 <= ny < h and not visited_cells[ny, nx]:
+                    visited_cells[ny, nx] = True
+                    val = grid[ny, nx]
 
-            wx, wy = map_data.map_to_world(cx, cy)
+                    if val < 0:
+                        # 碰到未知區，記錄此邊界點與真實繞牆步數
+                        frontier_points.append((cx, cy, cur_dist * map_data.resolution))
+                    elif 0 <= val < 50:
+                        # 安全空地，水滴繼續流
+                        queue.append((nx, ny, cur_dist + step_cost))
 
-            # 防線 1：邊界離機器人目前位置太近 (< 0.6m) 直接略過，不抽搐
+        if not frontier_points:
+            return []
+
+        # -------------------------------------------------------------
+        # 2. 智慧代價評分 + 雙階段 Fallback 分流
+        # -------------------------------------------------------------
+        primary_candidates = []   # 第一輪：優先探勘的大未知區域
+        fallback_candidates = []  # 第二輪：備用補漏的小碎屑或柱子陰影
+
+        r = 12  # 25x25 的檢測視野
+
+        for fx, fy, path_dist in frontier_points[::4]:
+            wx, wy = map_data.map_to_world(fx, fy)
+
+            # 防線 1：排除腳底下 (< 0.6m) 的點
             dist_to_robot = math.hypot(wx - robot_wx, wy - robot_wy)
             if dist_to_robot < self.min_dist:
                 continue
 
-            # 防線 2：黑名單過濾 (已訪問/無法到達)
-            is_ignored = any(math.hypot(wx - ig_x, wy - ig_y) < self.ignore_radius for ig_x, ig_y in ignored_targets)
-            if not is_ignored:
-                candidates.append((wx, wy, dist_cells, area))
+            # 防線 2：排除黑名單（已走過或到不了）
+            if any(math.hypot(wx - ig_x, wy - ig_y) < self.ignore_radius for ig_x, ig_y in ignored_targets):
+                continue
 
-        if not candidates:
+            # 統計該邊界點周遭的未知區域大小 (Information Gain)
+            y_min, y_max = max(0, fy - r), min(h, fy + r + 1)
+            x_min, x_max = max(0, fx - r), min(w, fx + r + 1)
+            local_patch = grid[y_min:y_max, x_min:x_max]
+            unknown_gain = np.sum(local_patch < 0)
+
+            # 綜合代價計算：距離成本 - (未知面積 * 權重 0.08)
+            cost = path_dist - (unknown_gain * 0.08)
+
+            # 雙階段分流：大開闊區優先，不足 12 格但超過 3 格的列為補漏備用
+            if unknown_gain >= 12:
+                primary_candidates.append((wx, wy, cost))
+            elif unknown_gain >= 3:
+                fallback_candidates.append((wx, wy, cost))
+
+        # 優先回傳大空間目標；如果找不到了，自動無縫切換去補掃小細節
+        targets = primary_candidates if primary_candidates else fallback_candidates
+
+        if not targets:
             return []
 
-        # 優先選擇：距離近且面積大的目標
-        candidates.sort(key=lambda p: (p[2], -p[3]))
-        return [(p[0], p[1]) for p in candidates]
+        # 依照 Cost 由低到高排序
+        targets.sort(key=lambda p: p[2])
+        return [(p[0], p[1]) for p in targets]
 
     @staticmethod
     def find_nearest_safe_free_goal(
@@ -140,11 +201,10 @@ class FrontierDetector:
         min_goal_dist: float = 0.5
     ) -> Optional[Tuple[float, float]]:
         """
-        尋找安全點，同時加上防線 3：確保安全點不會直接落在機器人腳底下 (< 0.5m)。
+        防線 3：將 Frontier 往安全自由空地退縮，避免目標在膨脹層內或貼著車底。
         """
         start_mx, start_my = map_data.world_to_map(fx, fy)
 
-        # 檢查原始點是否可用且非腳底
         if (0 <= start_mx < map_data.width and 
             0 <= start_my < map_data.height and 
             map_data.is_free(start_mx, start_my) and 
@@ -168,7 +228,6 @@ class FrontierDetector:
 
             if map_data.is_free(cx, cy) and not inflated_map[cy, cx]:
                 wx, wy = map_data.map_to_world(cx, cy)
-                # 防線 3：安全點不能在車底
                 if math.hypot(wx - robot_wx, wy - robot_wy) >= min_goal_dist:
                     return wx, wy
 
