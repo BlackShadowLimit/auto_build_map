@@ -8,8 +8,8 @@ from std_msgs.msg import String
 import tf2_ros
 from tf2_ros import TransformException
 
-from algorithms import FrontierDetector, MapData
-from controller import Nav2Controller
+from summer_robot.algorithms import FrontierDetector, MapData
+from summer_robot.controller import Nav2Controller
 
 
 class ExplorerNode(Node):
