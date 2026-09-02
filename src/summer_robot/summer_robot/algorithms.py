@@ -11,10 +11,6 @@ import numpy as np
 
 
 class MapData:
-    """
-    負責封裝與處理 OccupancyGrid 地圖資料的類別。
-    提供座標轉換 (world <-> map) 以及地圖狀態查詢等基礎功能。
-    """
     def __init__(self, occupancy_grid: OccupancyGrid):
         self.width      = occupancy_grid.info.width
         self.height     = occupancy_grid.info.height
@@ -54,16 +50,12 @@ class MapData:
 
 
 class FrontierDetector:
-    """
-    水滴擴散法 (Wavefront BFS) + 資訊增益代價評分 + 雙階段 Fallback 機制。
-    天然繞牆，優先探索開闊大廳，全圖探完後自動回頭補掃小角落。
-    """
     def __init__(
         self, 
         min_size: int = 4,
         search_radius: int = 800,
-        ignore_radius: float = 0.8,
-        min_distance_to_robot: float = 0.6  # 防原地抽搐：太近的不選
+        ignore_radius: float = 1.0,         # 放寬黑名單半徑，避免同一死巷重複踩
+        min_distance_to_robot: float = 0.8  # 防原地抽搐門檻
     ):
         self.min_size = min_size
         self.search_radius = search_radius
@@ -75,6 +67,8 @@ class FrontierDetector:
         map_data: MapData,
         robot_mx: int,
         robot_my: int,
+        robot_yaw: float = 0.0,             # 新增：車體當前朝向，抑制掉頭
+        current_target: Optional[Tuple[float, float]] = None, # 新增：當前鎖定的目標
         visited_list: Optional[List[Tuple[float, float]]] = None,
         unreachable_list: Optional[List[Tuple[float, float]]] = None
     ) -> List[Tuple[float, float]]:
@@ -93,13 +87,12 @@ class FrontierDetector:
             return []
 
         # -------------------------------------------------------------
-        # 1. 水滴擴散法 (BFS)：從機器人出發找可連通邊界
+        # 1. 水滴擴散法 (BFS)
         # -------------------------------------------------------------
         visited_cells = np.zeros((h, w), dtype=bool)
         frontier_points = []
 
         start_x, start_y = robot_mx, robot_my
-        # 若機器人目前位置貼牆，周遭 3x3 尋找最近的安全空地當作水滴起點
         if not (0 <= grid[start_y, start_x] < 50):
             found_free = False
             for dy in range(-2, 3):
@@ -124,7 +117,6 @@ class FrontierDetector:
 
         while queue:
             cx, cy, cur_dist = queue.popleft()
-
             if cur_dist > self.search_radius:
                 continue
 
@@ -135,59 +127,59 @@ class FrontierDetector:
                     val = grid[ny, nx]
 
                     if val < 0:
-                        # 碰到未知區，記錄此邊界點與真實繞牆步數
                         frontier_points.append((cx, cy, cur_dist * map_data.resolution))
                     elif 0 <= val < 50:
-                        # 安全空地，水滴繼續流
                         queue.append((nx, ny, cur_dist + step_cost))
 
         if not frontier_points:
             return []
 
         # -------------------------------------------------------------
-        # 2. 智慧代價評分 + 雙階段 Fallback 分流
+        # 2. 智慧代價評分（含轉向懲罰 + 當前目標黏滯度）
         # -------------------------------------------------------------
-        primary_candidates = []   # 第一輪：優先探勘的大未知區域
-        fallback_candidates = []  # 第二輪：備用補漏的小碎屑或柱子陰影
-
-        r = 12  # 25x25 的檢測視野
+        candidates = []
+        r = 12
 
         for fx, fy, path_dist in frontier_points[::4]:
             wx, wy = map_data.map_to_world(fx, fy)
 
-            # 防線 1：排除腳底下 (< 0.6m) 的點
+            # 防線 1：排除車底過近目標
             dist_to_robot = math.hypot(wx - robot_wx, wy - robot_wy)
             if dist_to_robot < self.min_dist:
                 continue
 
-            # 防線 2：排除黑名單（已走過或到不了）
+            # 防線 2：排除黑名單
             if any(math.hypot(wx - ig_x, wy - ig_y) < self.ignore_radius for ig_x, ig_y in ignored_targets):
                 continue
 
-            # 統計該邊界點周遭的未知區域大小 (Information Gain)
+            # 統計周遭未知面積
             y_min, y_max = max(0, fy - r), min(h, fy + r + 1)
             x_min, x_max = max(0, fx - r), min(w, fx + r + 1)
-            local_patch = grid[y_min:y_max, x_min:x_max]
-            unknown_gain = np.sum(local_patch < 0)
+            unknown_gain = np.sum(grid[y_min:y_max, x_min:x_max] < 0)
 
-            # 綜合代價計算：距離成本 - (未知面積 * 權重 0.08)
-            cost = path_dist - (unknown_gain * 0.08)
+            if unknown_gain < 4:
+                continue
 
-            # 雙階段分流：大開闊區優先，不足 12 格但超過 3 格的列為補漏備用
-            if unknown_gain >= 12:
-                primary_candidates.append((wx, wy, cost))
-            elif unknown_gain >= 3:
-                fallback_candidates.append((wx, wy, cost))
+            # --- 抑制打轉的兩大核心改進 ---
+            # 1. 轉向懲罰 (Heading Penalty)：大幅降低 180 度掉頭欲望
+            target_angle = math.atan2(wy - robot_wy, wx - robot_wx)
+            angle_diff = abs(math.atan2(math.sin(target_angle - robot_yaw), math.cos(target_angle - robot_yaw)))
+            heading_penalty = angle_diff * 1.5  # 掉頭會增加約 4.7 公尺的虛擬代價
 
-        # 優先回傳大空間目標；如果找不到了，自動無縫切換去補掃小細節
-        targets = primary_candidates if primary_candidates else fallback_candidates
+            # 2. 目標承諾黏滯性 (Hysteresis)：保持對當前目標的專注
+            stickiness_bonus = 0.0
+            if current_target is not None:
+                if math.hypot(wx - current_target[0], wy - current_target[1]) < 1.5:
+                    stickiness_bonus = -3.0  # 當前前進目標享有 3 公尺的成本減免
 
-        if not targets:
+            cost = path_dist + heading_penalty - (unknown_gain * 0.08) + stickiness_bonus
+            candidates.append((wx, wy, cost))
+
+        if not candidates:
             return []
 
-        # 依照 Cost 由低到高排序
-        targets.sort(key=lambda p: p[2])
-        return [(p[0], p[1]) for p in targets]
+        candidates.sort(key=lambda p: p[2])
+        return [(p[0], p[1]) for p in candidates]
 
     @staticmethod
     def find_nearest_safe_free_goal(
@@ -198,11 +190,8 @@ class FrontierDetector:
         robot_wy: float,
         inflated_map: np.ndarray,
         max_search_radius: int = 200,
-        min_goal_dist: float = 0.5
+        min_goal_dist: float = 0.6
     ) -> Optional[Tuple[float, float]]:
-        """
-        防線 3：將 Frontier 往安全自由空地退縮，避免目標在膨脹層內或貼著車底。
-        """
         start_mx, start_my = map_data.world_to_map(fx, fy)
 
         if (0 <= start_mx < map_data.width and 

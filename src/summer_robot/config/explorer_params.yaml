@@ -1,7 +1,7 @@
 explorer_node:
   ros__parameters:
-    min_size: 10
+    min_size: 6              # 稍微縮小，窄道開口的邊界才抓得到
     search_radius: 600
-    ignore_radius: 1.0
+    ignore_radius: 1.2       # 走過或到不了的區域黑名單範圍放大
     inflation_radius: 0.25
-    decision_rate: 1.0 # unit is Hz
+    decision_rate: 0.2       # 改成 0.2 Hz（每 5 秒決策一次），讓車子有足夠時間走通走廊
