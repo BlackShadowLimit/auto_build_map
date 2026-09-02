@@ -289,75 +289,61 @@ class MinimalExplorer(Node):
 
     def _detect_frontiers(self) -> list:
         """
-        使用 OpenCV 影像處理偵測所有 Frontier（已知空地 ↔ 未知區域邊界）。
-
-        演算法步驟：
-          1. 從 OccupancyGrid 建立兩張遮罩：
-               free_mask    — 自由格 (0~49)
-               unknown_mask — 未知格 (-1)
-          2. 膨脹 free_mask 1 格，使其與相鄰未知格「接觸」。
-          3. 取 free_dilated & unknown_mask → Frontier 像素集合。
-          4. 連通元件分析：計算各群集質心，過濾面積過小的雜訊。
-          5. 過濾超出 FRONTIER_MAX_DIST 及黑名單內的候選。
-          6. 依距離由近到遠排序後回傳。
-
-        ⚠ 使用 self.map_x / map_y（TF map 座標）計算距離，
-          絕不使用 odom 備援座標。
+        使用 BFS (廣度優先搜尋) 尋找最近的 Frontier。
+        由機器人當前位置開始，向外擴展搜尋自由空間，直到碰到未知區域 (-1)。
 
         回傳：
-          [(world_x, world_y, distance_m), ...]
+          [(world_x, world_y, distance_m)] (只回傳找到的第一個最合適的點)
         """
         m    = self.current_map
-        data = np.array(m.data, dtype=np.int8).reshape(m.info.height, m.info.width)
+        grid = np.array(m.data, dtype=np.int8).reshape(m.info.height, m.info.width)
         res  = m.info.resolution          # [m/cell]
         ox   = m.info.origin.position.x   # 地圖左下角 x 座標
         oy   = m.info.origin.position.y   # 地圖左下角 y 座標
+        width = m.info.width
+        height = m.info.height
 
         # 機器人在地圖格座標系中的位置（使用 TF map 座標）
-        robot_mx   = int((self.map_x - ox) / res)
-        robot_my   = int((self.map_y - oy) / res)
-        max_cells  = FRONTIER_MAX_DIST / res  # 搜索半徑換算成格數
+        start_x = int((self.map_x - ox) / res)
+        start_y = int((self.map_y - oy) / res)
 
-        # 建立遮罩
-        free_mask    = ((data >= 0) & (data < 50)).astype(np.uint8) * 255
-        unknown_mask = (data < 0).astype(np.uint8) * 255
+        if not (0 <= start_x < width and 0 <= start_y < height):
+            return []
 
-        # 計算 Frontier 像素：膨脹自由空間，取與未知空間的交集
-        kernel       = np.ones((3, 3), np.uint8)
-        free_dilated = cv2.dilate(free_mask, kernel, iterations=1)
-        frontier_px  = cv2.bitwise_and(free_dilated, unknown_mask)
+        from collections import deque
+        frontier_candidates = deque([(start_x, start_y)])
+        visited_cells = set([(start_x, start_y)])
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        
+        max_cells = FRONTIER_MAX_DIST / res
 
-        # 連通元件分析
-        num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(
-            frontier_px, connectivity=8)
+        while frontier_candidates:
+            cx, cy = frontier_candidates.popleft()
 
-        candidates = []
-        for lid in range(1, num_labels):   # 0 為背景，略過
-            if stats[lid, cv2.CC_STAT_AREA] < FRONTIER_MIN_AREA:
-                continue   # 面積太小，雜訊
-
-            # 質心格座標
-            cx = int(centroids[lid, 0])
-            cy = int(centroids[lid, 1])
-
-            # 格距離過濾
-            dist_cells = math.sqrt((cx - robot_mx) ** 2 + (cy - robot_my) ** 2)
+            # 檢查是否超出最大搜尋範圍，避免無止盡搜尋
+            dist_cells = math.sqrt((cx - start_x)**2 + (cy - start_y)**2)
             if dist_cells > max_cells:
                 continue
 
-            # 轉換為世界座標
-            wx = ox + cx * res
-            wy = oy + cy * res
+            for dx, dy in directions:
+                nx, ny = cx + dx, cy + dy
 
-            # 黑名單過濾
-            if self._is_blacklisted(wx, wy):
-                continue
+                if 0 <= nx < width and 0 <= ny < height:
+                    val = grid[ny, nx]
+                    if val == -1:
+                        # 找到未知區域，(cx, cy) 即為邊界上的自由格
+                        wx = ox + cx * res
+                        wy = oy + cy * res
+                        
+                        # 黑名單過濾
+                        if not self._is_blacklisted(wx, wy):
+                            return [(wx, wy, dist_cells * res)]
+                            
+                    elif 0 <= val < 50 and (nx, ny) not in visited_cells:
+                        visited_cells.add((nx, ny))
+                        frontier_candidates.append((nx, ny))
 
-            candidates.append((wx, wy, dist_cells * res))
-
-        # 由近到遠排序（貪心策略：優先探索近處）
-        candidates.sort(key=lambda p: p[2])
-        return candidates
+        return []
 
 
     # =========================================================================
