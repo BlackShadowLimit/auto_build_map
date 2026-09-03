@@ -69,10 +69,16 @@ class GroundScannerNode(Node):
         center = (w // 2, h // 2)
         radius = int(min(h, w) * 0.48)
         cv2.circle(mask_circle, center, radius, 255, -1)
+        
+        # --- 切除畫面最底部（車體陰影區與黑邊） ---
+        bottom_crop_y = int(h / 2 + radius) - 40
+        if bottom_crop_y < h:
+            mask_circle[bottom_crop_y:, :] = 0
 
-        # 2. 動態擷取「鏡頭正下方」的地板顏色 (畫面最底中央)
-        # 因為已知最下方必定是安全地面 (若無障礙物擋住鏡頭)
-        ref_roi = frame[h-30:h-5, w//2-30:w//2+30]
+        # 2. 動態擷取「鏡頭正下方」的地板顏色 (避開被切除的底部陰影區)
+        ref_y_end = bottom_crop_y - 5
+        ref_y_start = ref_y_end - 25
+        ref_roi = frame[ref_y_start:ref_y_end, w//2-30:w//2+30]
         ref_hsv = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2HSV)
         
         median_h = np.median(ref_hsv[:, :, 0])
@@ -127,10 +133,14 @@ class GroundScannerNode(Node):
             strip = floor_mask[:, i * col_step:(i + 1) * col_step]
             col_profile = np.max(strip, axis=1) # 將該區塊水平壓縮成一條線
             
+            strip_valid = mask_circle[:, i * col_step:(i + 1) * col_step]
+            col_valid = np.max(strip_valid, axis=1) # 檢查是否在有效視角內
+            
             # 從畫面底部 (離車體最近) 往上 (遠處) 尋找第一個「非地板 (0)」的像素
             obstacle_y = -1
             for y in range(h - 1, h // 2, -1):
-                if col_profile[y] == 0:
+                # 必須在有效範圍內 (col_valid > 0) 且偵測到非地板 (col_profile == 0)
+                if col_valid[y] > 0 and col_profile[y] == 0:
                     obstacle_y = y
                     break
                     
