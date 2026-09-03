@@ -88,6 +88,16 @@ class GroundScannerNode(Node):
         
         # 產生「是地板」的二值化遮罩
         floor_mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
+
+        # === 新增：建立紫紅色干擾遮罩 ===
+        lower_purple = np.array([135, 50, 50])
+        upper_purple = np.array([165, 255, 255])
+        purple_mask = cv2.inRange(hsv_frame, lower_purple, upper_purple)
+
+        # 將紫紅色遮罩「聯集 (OR)」加入地板遮罩中，強迫程式將紫色視為安全區域
+        floor_mask = cv2.bitwise_or(floor_mask, purple_mask)
+        
+        # 最後再套用魚眼邊界遮罩，濾除圓形外的黑邊
         floor_mask = cv2.bitwise_and(floor_mask, mask_circle)
 
         # 4. 形態學處理：消除磨石子黑斑造成的偽障礙物破洞
