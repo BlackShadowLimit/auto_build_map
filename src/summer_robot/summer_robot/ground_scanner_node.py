@@ -7,7 +7,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage, LaserScan
+from sensor_msgs.msg import Image, LaserScan
 
 class GroundScannerNode(Node):
     def __init__(self):
@@ -16,18 +16,17 @@ class GroundScannerNode(Node):
 
         # --- 使用者提供的額外資訊 ---
         self.cam_height = 0.15   # 相機離地高度 15 cm (0.15 m)
-        # 地磚尺寸: 300mm x 300mm (0.3m x 0.3m)
-        # 已知: 畫面正下方 (y = height) 對應距離為 0m (鏡頭正下方)
         
         self.hfov = 2.09         # 水平視角 (約120度，與原掃描節點一致)
         self.num_readings = 60   # 輸出的雷射射線數量
         self.max_detect_dist = 2.0
 
         # 建立影像訂閱與虛擬雷射發布
-        self.sub = self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self._on_image, 10)
+        # 修改：為了在樹莓派上避免壓縮雜訊，直接訂閱無損的原生 Image
+        self.sub = self.create_subscription(Image, '/camera/image_raw', self._on_image, 10)
         self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
         
-        self.get_logger().info("GroundScannerNode (針對磨石子地磚優化版) 已就緒...")
+        self.get_logger().info("GroundScannerNode (樹莓派無損影像優化版) 已就緒...")
 
     def pixel_to_distance(self, y, h):
         """
@@ -48,9 +47,10 @@ class GroundScannerNode(Node):
         dist = self.cam_height / math.tan(angle_down_from_horizon)
         return float(np.clip(dist, 0.0, self.max_detect_dist))
 
-    def _on_image(self, msg: CompressedImage):
+    def _on_image(self, msg: Image):
         try:
-            frame = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            # 修改：使用 imgmsg_to_cv2 轉換 Raw Image
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().error(f"cv_bridge 轉換失敗: {e}")
             return
