@@ -46,6 +46,10 @@ class ExplorerNode(Node):
         self.unreachable_list: List[Tuple[float, float]] = []
         self.current_target: Optional[Tuple[float, float]] = None  # 新增：追蹤當前目標
         self.exploration_done = False
+        
+        # 新增：連續失敗計數與上限
+        self.consecutive_failures = 0
+        self.max_failures_to_stop = 3
 
         # 給予 10 次容錯緩衝 (約 10 秒)，避免開機地圖未成形直接退出
         self.no_frontier_count = 0
@@ -87,9 +91,11 @@ class ExplorerNode(Node):
         
         if success:
             self.visited_list.append(goal)
+            self.consecutive_failures = 0  # 成功到達，計數器歸零
         else:
             self.unreachable_list.append(goal)
-            self.get_logger().warn(f"[Explore] Nav failed, blacklisting target: {goal}")
+            self.consecutive_failures += 1 # 失敗，累加計數器
+            self.get_logger().warn(f"[Explore] Nav failed ({self.consecutive_failures}/{self.max_failures_to_stop}), blacklisting target: {goal}")
             
             # 新增：限制黑名單長度，避免無效點堆積吃效能或永久鎖死
             if len(self.unreachable_list) > 30:
@@ -97,6 +103,13 @@ class ExplorerNode(Node):
 
     def _step(self):
         if self.exploration_done or self.controller.is_navigating:
+            return
+
+        # 1. 達標終止判斷：如果連續失敗達上限，代表跳躍無效，結束掃描
+        if self.consecutive_failures >= self.max_failures_to_stop:
+            self.get_logger().info(f"Nav failed {self.max_failures_to_stop} times consecutively. Force stopping exploration!")
+            self.exploration_done = True
+            self.status_pub.publish(String(data="EXPLORATION_COMPLETE"))
             return
 
         if self.current_map_data is None:
@@ -116,6 +129,13 @@ class ExplorerNode(Node):
         unknown_cells = np.sum(grid < 0)
         self.get_logger().info(f"[Map] Size: {self.current_map_data.width}x{self.current_map_data.height} | Free: {free_cells} | Unknown: {unknown_cells}")
 
+        # 2. 動態跳躍：根據失敗次數，暫時放大 detector 的黑名單半徑
+        original_ignore_radius = self.detector.ignore_radius
+        if self.consecutive_failures == 1:
+            self.detector.ignore_radius = 1.5  # 第一次失敗，嘗試中距離跳躍
+        elif self.consecutive_failures >= 2:
+            self.detector.ignore_radius = 3.0  # 第二次以上失敗，嘗試遠距離跳躍
+
         # 修改：傳入 robot_yaw 與 current_target
         candidates = self.detector.detect(
             self.current_map_data,
@@ -126,6 +146,9 @@ class ExplorerNode(Node):
             visited_list=self.visited_list,
             unreachable_list=self.unreachable_list
         )
+        
+        # 恢復原始設定
+        self.detector.ignore_radius = original_ignore_radius
 
         if not candidates:
             self.no_frontier_count += 1
