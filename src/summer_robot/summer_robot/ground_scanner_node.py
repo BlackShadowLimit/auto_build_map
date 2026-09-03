@@ -25,8 +25,8 @@ class GroundScannerNode(Node):
         # 發布壓縮過的 Debug 影像，方便在 PC 端監控與除錯 (低頻寬消耗)
         self.debug_pub = self.create_publisher(CompressedImage, '/camera_debug/compressed', 2)
         
-        # 開啟硬體攝影機 (通常樹莓派上的 USB 攝影機是 /dev/video0)
-        self.cap = cv2.VideoCapture(0)
+        # 開啟硬體攝影機 (強制使用 V4L2 避免 GStreamer 錯誤)
+        self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
@@ -59,11 +59,16 @@ class GroundScannerNode(Node):
         return float(np.clip(dist, 0.0, self.max_detect_dist))
 
     def _capture_loop(self):
+        fail_count = 0
         while rclpy.ok():
             ret, frame = self.cap.read()
             if not ret:
+                fail_count += 1
+                if fail_count % 30 == 0:
+                    self.get_logger().error(f"相機讀取失敗！(已失敗 {fail_count} 次)，請確認 /dev/video0 是否被佔用。")
                 continue
-                
+            
+            fail_count = 0    
             # 建立假的 Header 提供給 LaserScan
             stamp = self.get_clock().now().to_msg()
             self._process_frame(frame, stamp)
