@@ -86,16 +86,16 @@ class GroundScannerNode(Node):
         ref_roi = frame[ref_y_start:ref_y_end, w//2-30:w//2+30]
         ref_hsv = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2HSV)
         
-        median_h = np.median(ref_hsv[:, :, 0])
-        median_s = np.median(ref_hsv[:, :, 1])
-        median_v = np.median(ref_hsv[:, :, 2])
+        median_h = int(np.median(ref_hsv[:, :, 0]))
+        median_s = int(np.median(ref_hsv[:, :, 1]))
+        median_v = int(np.median(ref_hsv[:, :, 2]))
 
         # 3. HSV 色彩空間分割
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
         # 放寬標準：容忍更大的顏色與亮度變化 (陰影通常會讓亮度 V 下降、飽和度 S 改變)
-        lower_bound = np.array([max(0, median_h - 35), max(0, median_s - 60), max(0, median_v - 150)])
-        upper_bound = np.array([min(179, median_h + 35), min(255, median_s + 80), min(255, median_v + 80)])
+        lower_bound = np.array([max(0, median_h - 35), max(0, median_s - 60), max(0, median_v - 150)], dtype=np.int32)
+        upper_bound = np.array([min(179, median_h + 35), min(255, median_s + 80), min(255, median_v + 80)], dtype=np.int32)
         
         # 產生「是地板」的二值化遮罩
         floor_mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
