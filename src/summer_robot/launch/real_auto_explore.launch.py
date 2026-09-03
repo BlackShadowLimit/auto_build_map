@@ -9,7 +9,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # 1. 強制寫入實體車環境變數 (免去手動 export)
     os.environ['TURTLEBOT3_MODEL'] = 'burger'
-    os.environ['LDS_MODEL'] = 'lds-01'  # 若光達是新款，請改為 'lds-02'
+    os.environ['LDS_MODEL'] = 'lds-02'  # 若光達是新款，請改為 'lds-02'
 
     pkg_summer_robot = get_package_share_directory('summer_robot')
     tb3_cartographer_dir = get_package_share_directory('turtlebot3_cartographer')
