@@ -60,6 +60,10 @@ class ExplorerNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        # 避免機器人卡死太久的主動偵測器
+        self.last_pose: Optional[Tuple[float, float]] = None
+        self.last_progress_time = self.get_clock().now()
+
         map_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -102,7 +106,7 @@ class ExplorerNode(Node):
                 self.unreachable_list.pop(0)
 
     def _step(self):
-        if self.exploration_done or self.controller.is_navigating:
+        if self.exploration_done or self.current_map_data is None:
             return
 
         # 1. 達標終止判斷：如果連續失敗達上限，代表跳躍無效，結束掃描
@@ -112,13 +116,15 @@ class ExplorerNode(Node):
             self.status_pub.publish(String(data="EXPLORATION_COMPLETE"))
             return
 
-        if self.current_map_data is None:
-            self.get_logger().warn("[Explore] waiting for /map building")
-            return 
-
         rx, ry, ryaw = self._get_robot_pose()
-        if rx is None:
+        if rx is None or ry is None or ryaw is None:
             self.get_logger().warn("[Explore] wait for TF (map -> base_footprint)...")
+            return
+
+
+
+        # 如果正在導航中，就不要重新尋找新目標 (鎖定目標)
+        if self.controller.is_navigating:
             return
 
         rmx, rmy = self.current_map_data.world_to_map(rx, ry)
@@ -132,9 +138,9 @@ class ExplorerNode(Node):
         # 2. 動態跳躍：根據失敗次數，暫時放大 detector 的黑名單半徑
         original_ignore_radius = self.detector.ignore_radius
         if self.consecutive_failures == 1:
-            self.detector.ignore_radius = 1.5  # 第一次失敗，嘗試中距離跳躍
+            self.detector.ignore_radius = 1.0  # 第一次失敗，嘗試中距離跳躍
         elif self.consecutive_failures >= 2:
-            self.detector.ignore_radius = 3.0  # 第二次以上失敗，嘗試遠距離跳躍
+            self.detector.ignore_radius = 1.5  # 第二次以上失敗，嘗試遠距離跳躍
 
         # 修改：傳入 robot_yaw 與 current_target
         candidates = self.detector.detect(
@@ -179,8 +185,9 @@ class ExplorerNode(Node):
             return
 
         # 紀錄鎖定目標並發送給 Nav2
-        self.current_target = safe_target
-        self.controller.send_goal(safe_target[0], safe_target[1])
+        if self.controller.send_goal(safe_target[0], safe_target[1]):
+            self.current_target = safe_target
+            self.get_logger().info(f"[Explore] Navigate to: ({safe_target[0]:.2f}, {safe_target[1]:.2f})")
 
 
 def main(args=None):

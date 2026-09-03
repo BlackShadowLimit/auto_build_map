@@ -163,16 +163,19 @@ class FrontierDetector:
             if unknown_gain < 3:
                 continue
 
-            # 轉向懲罰
+            # 轉向懲罰 (改為 DFS 邏輯：前方 180 度內可自由走動，但強烈拒絕回頭)
             target_angle = math.atan2(wy - robot_wy, wx - robot_wx)
             angle_diff = abs(math.atan2(math.sin(target_angle - robot_yaw), math.cos(target_angle - robot_yaw)))
-            heading_penalty = angle_diff * 0.8
+            if angle_diff > 1.57:  # 超過 90 度 (在背後)
+                heading_penalty = 15.0
+            else:
+                heading_penalty = angle_diff * 0.5
 
-            # 目標黏滯性
+            # 目標黏滯性 (提高黏滯性，讓它一旦決定方向就不輕易放棄)
             stickiness_bonus = 0.0
             if current_target is not None:
-                if math.hypot(wx - current_target[0], wy - current_target[1]) < 1.2:
-                    stickiness_bonus = -3.0
+                if math.hypot(wx - current_target[0], wy - current_target[1]) < 1.5:
+                    stickiness_bonus = -8.0
 
             dist_cost = path_dist * 1.5
             cost = path_dist + heading_penalty - (unknown_gain * 0.05) + stickiness_bonus

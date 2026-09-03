@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 from typing import Callable, Optional, Tuple
 
 from action_msgs.msg import GoalStatus
@@ -25,7 +26,13 @@ class Nav2Controller:
         self.is_navigating = False
         self.current_goal: Optional[Tuple[float, float]] = None
 
-    def send_goal(self, x: float, y: float) -> bool:
+    def send_goal(self, x: float, y: float, force: bool = False) -> bool:
+        if self.is_navigating and self.current_goal and not force:
+            # 如果新目標距離原本的目標不到 0.5 公尺，就不重複發送，避免打斷導航跟脫困
+            dist = math.hypot(x - self.current_goal[0], y - self.current_goal[1])
+            if dist < 0.5:
+                return False
+
         if not self.nav_client.wait_for_server(timeout_sec=1.0):
             self.node.get_logger().error('Nav2 Action Server (navigate_to_pose) is not online')
             return False
@@ -56,10 +63,21 @@ class Nav2Controller:
                 self.on_finish_callback(False, failed_goal)
             return
 
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_navigation_finished)
+        self.goal_handle = goal_handle
+        self._get_result_future = goal_handle.get_result_async()
+        self._get_result_future.add_done_callback(self._on_navigation_finished)
+
+    def cancel_goal(self):
+        if self.is_navigating and hasattr(self, 'goal_handle') and self.goal_handle:
+            self.node.get_logger().warn("[Explore] Proactively cancelling current goal due to stuck detection!")
+            self.goal_handle.cancel_goal_async()
+            # do not clear state here; wait for _on_navigation_finished to handle the cancellation result
 
     def _on_navigation_finished(self, future):
+        if hasattr(self, '_get_result_future') and future != self._get_result_future:
+            # 這是被新目標覆蓋（Preempted）的舊目標回呼，直接忽略，不當作失敗
+            return
+
         status = future.result().status
         success = (status == GoalStatus.STATUS_SUCCEEDED)
         finished_goal = self.current_goal

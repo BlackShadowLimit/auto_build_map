@@ -220,17 +220,17 @@
   <joint name="${namespace}camera_joint" type="fixed">
     <parent link="${namespace}base_link"/>
 	<child link="${namespace}camera_link"/>
-	<!-- 此處為前向平視相機，無傾斜 -->
-    <origin xyz="0.04 0 0.13" rpy="0 0 0"/>
+	<!-- 此處為朝下90度的相機 -->
+    <origin xyz="0.10 0 0.13" rpy="0 1.5708 0"/>
   </joint>
 
   <!-- Gazebo 相機外掛 -->
   <gazebo reference="${namespace}camera_link">
-    <sensor type="camera" name="general_camera">
+    <sensor type="wideanglecamera" name="general_camera">
       <always_on>true</always_on>
       <update_rate>30.0</update_rate>
       <camera name="head">
-        <horizontal_fov>1.085</horizontal_fov>
+        <horizontal_fov>2.4</horizontal_fov>
         <image>
           <width>640</width>
           <height>480</height>
@@ -240,6 +240,18 @@
           <near>0.03</near>
           <far>100</far>
         </clip>
+        <lens>
+          <type>custom</type>
+          <custom_function>
+            <c1>1.05</c1>
+            <c2>4</c2>
+            <f>1.0</f>
+            <fun>tan</fun>
+          </custom_function>
+          <scale_to_hfov>true</scale_to_hfov>
+          <cutoff_angle>3.14159</cutoff_angle>
+          <env_texture_size>512</env_texture_size>
+        </lens>
       </camera>
       <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
         <ros>

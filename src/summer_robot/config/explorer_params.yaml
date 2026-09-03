@@ -4,4 +4,4 @@ explorer_node:
     search_radius: 600
     ignore_radius: 0.6       # 走過或到不了的區域黑名單範圍放大
     inflation_radius: 0.25
-    decision_rate: 0.2       # 改成 0.2 Hz（每 5 秒決策一次），讓車子有足夠時間走通走廊
+    decision_rate: 2.0       # 改成 2.0 Hz（每 0.5 秒決策一次），實現邊走邊連貫決策

@@ -66,18 +66,18 @@ def generate_launch_description():
     )
 
     # 5. 【新增】：延遲 6 秒啟動地面視覺避障雷達節點（待相機出圖後進行地面校準）
-    ground_scanner_launch = TimerAction(
-        period=6.0,
-        actions=[
-            Node(
-                package='summer_robot',
-                executable='ground_scanner_node',
-                name='ground_scanner_node',
-                output='screen',
-                parameters=[{'use_sim_time': use_sim_time}]
-            )
-        ]
-    )
+   # ground_scanner_launch = TimerAction(
+   #     period=6.0,
+   #     actions=[
+   #         Node(
+   #             package='summer_robot',
+   #             executable='ground_scanner_node',
+   #             name='ground_scanner_node',
+   #             output='screen',
+   #             parameters=[{'use_sim_time': use_sim_time}]
+   #         )
+   #     ]
+   # )
 
     # 6. 延遲 15 秒啟動 Nav2
     nav2_launch = TimerAction(
@@ -115,7 +115,7 @@ def generate_launch_description():
         robot_state_publisher,
         spawn_burger,
         cartographer_launch,
-        ground_scanner_launch,  # <--- 已加入
+        # ground_scanner_launch,
         nav2_launch,
         explorer_node
     ])
