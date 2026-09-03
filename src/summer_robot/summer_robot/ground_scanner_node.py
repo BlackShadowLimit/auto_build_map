@@ -70,6 +70,11 @@ class GroundScannerNode(Node):
         radius = int(min(h, w) * 0.48)
         cv2.circle(mask_circle, center, radius, 255, -1)
         
+        # --- 裁切畫面：只專注於下半部的真實地板 ---
+        # 根據您提供的截圖，天花板和牆壁被誤認為地板。我們直接將畫面中線 (h*0.55) 以上的區域全部塗黑忽略！
+        horizon_y = int(h * 0.55)
+        mask_circle[0:horizon_y, :] = 0
+        
         # --- 切除畫面最底部（車體陰影區與黑邊） ---
         bottom_crop_y = int(h / 2 + radius) - 60  # 擴大裁切範圍，徹底避開邊緣 0.05m 的雜訊
         if bottom_crop_y < h:
