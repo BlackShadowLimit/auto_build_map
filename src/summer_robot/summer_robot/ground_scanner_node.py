@@ -83,7 +83,8 @@ class GroundScannerNode(Node):
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
         # 設定針對磨石子地磚的動態寬容度 (容許斑點的亮暗變化)
-        lower_bound = np.array([max(0, median_h - 25), max(0, median_s - 40), max(0, median_v - 70)])
+        # 放寬亮度的下限，容許更暗的接縫 (從 -70 改為 -120)
+        lower_bound = np.array([max(0, median_h - 25), max(0, median_s - 40), max(0, median_v - 120)])
         upper_bound = np.array([min(179, median_h + 25), min(255, median_s + 60), min(255, median_v + 60)])
         
         # 產生「是地板」的二值化遮罩
@@ -101,11 +102,13 @@ class GroundScannerNode(Node):
         floor_mask = cv2.bitwise_and(floor_mask, mask_circle)
 
         # 4. 形態學處理：消除磨石子黑斑造成的偽障礙物破洞
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-        # 閉運算：將地板中的小黑洞(斑點)填滿
-        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # 放大 kernel 尺寸 (11x11 改為 21x21)，以跨越/填補磁磚接縫
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        # 閉運算：將地板中的磁磚接縫、黑洞(斑點)填滿 (增加 iterations=3)
+        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_CLOSE, kernel_close, iterations=3)
         # 開運算：消除散落的雜訊
-        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
 
         # 5. 生成 LaserScan 掃描資料
         scan = LaserScan()
@@ -139,8 +142,10 @@ class GroundScannerNode(Node):
 
         scan.ranges = ranges
 
-        if any(r < float('inf') for r in ranges):
-            self.get_logger().info("偵測到障礙物")
+        valid_ranges = [r for r in ranges if r < float('inf')]
+        if valid_ranges:
+            min_dist = min(valid_ranges)
+            self.get_logger().info(f"偵測到障礙物，最近距離: {min_dist:.2f} 公尺")
 
         self.scan_pub.publish(scan)
 
