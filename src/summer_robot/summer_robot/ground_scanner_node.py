@@ -7,26 +7,35 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, LaserScan
+from sensor_msgs.msg import LaserScan
+import threading
 
 class GroundScannerNode(Node):
     def __init__(self):
         super().__init__('ground_scanner_node')
-        self.bridge = CvBridge()
-
+        
         # --- 使用者提供的額外資訊 ---
         self.cam_height = 0.15   # 相機離地高度 15 cm (0.15 m)
-        
-        self.hfov = 2.09         # 水平視角 (約120度，與原掃描節點一致)
+        self.hfov = 2.09         # 水平視角 (約120度)
         self.num_readings = 60   # 輸出的雷射射線數量
         self.max_detect_dist = 2.0
 
-        # 建立影像訂閱與虛擬雷射發布
-        # 修改：為了在樹莓派上避免壓縮雜訊，直接訂閱無損的原生 Image
-        self.sub = self.create_subscription(Image, '/camera/image_raw', self._on_image, 10)
+        # 直接發布 LaserScan
         self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
         
-        self.get_logger().info("GroundScannerNode (樹莓派無損影像優化版) 已就緒...")
+        # 開啟硬體攝影機 (通常樹莓派上的 USB 攝影機是 /dev/video0)
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        if not self.cap.isOpened():
+            self.get_logger().error("無法開啟硬體相機 /dev/video0！")
+        else:
+            self.get_logger().info("GroundScannerNode (硬體直讀極速版) 已就緒...")
+            # 開啟背景執行緒不斷擷取影像，避免阻塞 ROS spin
+            self.capture_thread = threading.Thread(target=self._capture_loop)
+            self.capture_thread.daemon = True
+            self.capture_thread.start()
 
     def pixel_to_distance(self, y, h):
         """
@@ -47,14 +56,17 @@ class GroundScannerNode(Node):
         dist = self.cam_height / math.tan(angle_down_from_horizon)
         return float(np.clip(dist, 0.0, self.max_detect_dist))
 
-    def _on_image(self, msg: Image):
-        try:
-            # 修改：使用 imgmsg_to_cv2 轉換 Raw Image
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        except Exception as e:
-            self.get_logger().error(f"cv_bridge 轉換失敗: {e}")
-            return
+    def _capture_loop(self):
+        while rclpy.ok():
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+                
+            # 建立假的 Header 提供給 LaserScan
+            stamp = self.get_clock().now().to_msg()
+            self._process_frame(frame, stamp)
 
+    def _process_frame(self, frame, stamp):
         h, w, _ = frame.shape
         
         # 1. 魚眼邊界遮罩 (過濾圓形以外的無效黑邊)
@@ -112,7 +124,7 @@ class GroundScannerNode(Node):
 
         # 5. 生成 LaserScan 掃描資料
         scan = LaserScan()
-        scan.header.stamp = msg.header.stamp
+        scan.header.stamp = stamp
         scan.header.frame_id = "base_footprint"  # 修改為水平座標系，避免因 camera_link 傾斜 45 度導致訊號被當成地板以下而丟棄
         scan.angle_min = -self.hfov / 2.0
         scan.angle_max = self.hfov / 2.0
