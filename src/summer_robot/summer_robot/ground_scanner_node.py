@@ -76,7 +76,7 @@ class GroundScannerNode(Node):
         mask_circle[0:horizon_y, :] = 0
         
         # --- 切除畫面最底部（車體陰影區與黑邊） ---
-        bottom_crop_y = int(h / 2 + radius) - 60  # 擴大裁切範圍，徹底避開邊緣 0.05m 的雜訊
+        bottom_crop_y = int(h / 2 + radius) - 60
         if bottom_crop_y < h:
             mask_circle[bottom_crop_y:, :] = 0
 
@@ -93,10 +93,9 @@ class GroundScannerNode(Node):
         # 3. HSV 色彩空間分割
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # 設定針對磨石子地磚的動態寬容度 (容許斑點的亮暗變化)
-        # 放寬亮度的下限，容許更暗的接縫 (從 -70 改為 -120)
-        lower_bound = np.array([max(0, median_h - 25), max(0, median_s - 40), max(0, median_v - 120)])
-        upper_bound = np.array([min(179, median_h + 25), min(255, median_s + 60), min(255, median_v + 60)])
+        # 放寬標準：容忍更大的顏色與亮度變化 (陰影通常會讓亮度 V 下降、飽和度 S 改變)
+        lower_bound = np.array([max(0, median_h - 35), max(0, median_s - 60), max(0, median_v - 150)])
+        upper_bound = np.array([min(179, median_h + 35), min(255, median_s + 80), min(255, median_v + 80)])
         
         # 產生「是地板」的二值化遮罩
         floor_mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
@@ -114,10 +113,10 @@ class GroundScannerNode(Node):
         floor_mask = cv2.bitwise_and(floor_mask, mask_circle)
 
         # 4. 形態學處理：消除磨石子黑斑造成的偽障礙物破洞
-        # 放大 kernel 尺寸 (11x11 改為 21x21)，以跨越/填補磁磚接縫
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
+        # 依照您的要求，將閉合運算 (Close) 縮小，避免過度膨脹吃到真實障礙物的邊界
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
         kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-        # 閉運算：將地板中的磁磚接縫、黑洞(斑點)填滿 (增加 iterations=3)
+        # 閉運算：將地板中的磁磚接縫、黑洞(斑點)填滿 (維持 iterations=3)
         floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_CLOSE, kernel_close, iterations=3)
         # 開運算：消除散落的雜訊
         floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
