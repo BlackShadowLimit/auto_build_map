@@ -7,7 +7,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, CompressedImage
 import threading
 
 class GroundScannerNode(Node):
@@ -22,6 +22,8 @@ class GroundScannerNode(Node):
 
         # 直接發布 LaserScan
         self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
+        # 發布壓縮過的 Debug 影像，方便在 PC 端監控與除錯 (低頻寬消耗)
+        self.debug_pub = self.create_publisher(CompressedImage, '/camera_debug/compressed', 2)
         
         # 開啟硬體攝影機 (通常樹莓派上的 USB 攝影機是 /dev/video0)
         self.cap = cv2.VideoCapture(0)
@@ -133,6 +135,7 @@ class GroundScannerNode(Node):
         scan.range_max = self.max_detect_dist
 
         ranges = []
+        obstacle_pixels = []
         col_step = w // self.num_readings
 
         for i in range(self.num_readings):
@@ -153,8 +156,10 @@ class GroundScannerNode(Node):
             if obstacle_y != -1:
                 dist = self.pixel_to_distance(obstacle_y, h)
                 ranges.append(dist)
+                obstacle_pixels.append((int((i + 0.5) * col_step), obstacle_y))
             else:
                 ranges.append(float('inf'))
+                obstacle_pixels.append(None)
 
         scan.ranges = ranges
 
@@ -164,6 +169,34 @@ class GroundScannerNode(Node):
             self.get_logger().info(f"偵測到障礙物，最近距離: {min_dist:.2f} 公尺")
 
         self.scan_pub.publish(scan)
+
+        # 6. 生成並發布 Debug 影像 (僅當有人訂閱時，或直接發送以利 RViz 隨時查看)
+        # 繪製半透明的綠色遮罩代表「被判定為地板的安全區域」
+        debug_frame = frame.copy()
+        
+        # 使用 OpenCV 安全的方法繪製半透明遮罩
+        green_overlay = np.zeros_like(debug_frame)
+        green_overlay[:] = (0, 255, 0)
+        mask_bool = floor_mask > 0
+        debug_frame[mask_bool] = cv2.addWeighted(debug_frame[mask_bool], 0.6, green_overlay[mask_bool], 0.4, 0)
+        
+        # 畫出障礙物的掃描紅點與距離
+        for i, pt in enumerate(obstacle_pixels):
+            if pt is not None:
+                x, y = pt
+                cv2.circle(debug_frame, (x, y), 5, (0, 0, 255), -1)
+                dist_str = f"{ranges[i]:.2f}m"
+                cv2.putText(debug_frame, dist_str, (x-15, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        
+        # 編碼成 JPEG 壓縮影像
+        success, encoded_image = cv2.imencode('.jpg', debug_frame)
+        if success:
+            msg_img = CompressedImage()
+            msg_img.header.stamp = stamp
+            msg_img.header.frame_id = "camera_link"
+            msg_img.format = "jpeg"
+            msg_img.data = encoded_image.tobytes()
+            self.debug_pub.publish(msg_img)
 
 def main(args=None):
     rclpy.init(args=args)
