@@ -7,6 +7,10 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generate_launch_description():
+    # 強制在 Launch 內寫入實體車硬體所需的環境變數，免去手動 export 的麻煩
+    os.environ['TURTLEBOT3_MODEL'] = 'burger'
+    os.environ['LDS_MODEL'] = 'lds-01'  # 如果你的實體車光達是新版，可改為 'lds-02'
+
     pkg_summer_robot = get_package_share_directory('summer_robot')
     tb3_cartographer_dir = get_package_share_directory('turtlebot3_cartographer')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
@@ -17,18 +21,18 @@ def generate_launch_description():
     nav2_params_file = os.path.join(pkg_summer_robot, 'config', 'nav2_params.yaml')
     explorer_params_file = os.path.join(pkg_summer_robot, 'config', 'explorer_params.yaml')
 
-    # 1. 啟動實體車底盤與光達驅動 (確保 /scan 和 /odom 正常發布)
+    # 1. 啟動實體車底盤與光達驅動
     turtlebot3_bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(turtlebot3_bringup_dir, 'launch', 'robot.launch.py'))
     )
 
-    # 2. 啟動 Cartographer 建圖 (官方內建會開一個 RViz，不要另外手動加 rviz_node)
+    # 2. 啟動 Cartographer 建圖
     cartographer_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(tb3_cartographer_dir, 'launch', 'cartographer.launch.py')),
         launch_arguments={'use_sim_time': use_sim_time}.items()
     )
 
-    # 3. 地面視覺避障雷達節點 (延遲啟動，給相機驅動一點準備時間)
+    # 3. 地面視覺避障雷達節點
     ground_scanner_launch = TimerAction(
         period=5.0,
         actions=[
