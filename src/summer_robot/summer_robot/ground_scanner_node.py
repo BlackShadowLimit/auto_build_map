@@ -32,27 +32,20 @@ class GroundScannerNode(Node):
     def pixel_to_distance(self, y, h):
         """
         將影像 y 座標轉換為前方物理距離 (m)。
-        已知：畫面最底部 (y = h) 是鏡頭正下方 (距離 0m)。
-        未來若需更精確距離，可利用 30cm 地磚網格的像素座標進行多項式曲線擬合 (Polynomial Fitting)。
-        目前採用基於相機高度與垂直視角的三角幾何推導。
+        前向相機模型：畫面正中心 (h/2) 為地平線 (無限遠)。
         """
-        if y >= h - 1:
-            return 0.0
+        pixel_dy = y - (h / 2.0)
         
-        # 假設下半部畫面的垂直視角分佈為 90 度 (從正下方的 -90 度到水平的 0 度)
-        vfov_bottom_half = 1.5708 
-        ratio = (h - y) / (h / 2.0)  # y 在下半部時的比例 (0 ~ 1)
-        
-        if ratio >= 1.0: # 超過畫面下半部，視為無限遠
+        # 如果像素在畫面上半部或正中心，代表看向上方或地平線，距離無限遠
+        if pixel_dy <= 0:
             return float('inf')
             
-        angle_from_vertical = ratio * vfov_bottom_half
+        # 假設垂直視角為 90 度 (vfov = 1.5708 rad)，從中心到最底部的角度為 vfov/2
+        vfov = 1.5708
+        angle_down_from_horizon = (pixel_dy / (h / 2.0)) * (vfov / 2.0)
         
-        if angle_from_vertical < 0.01:
-            return 0.0
-            
-        # 距離 = 相機高度 * tan(與垂直線的夾角)
-        dist = self.cam_height * math.tan(angle_from_vertical)
+        # 距離 = 相機高度 / tan(俯角)
+        dist = self.cam_height / math.tan(angle_down_from_horizon)
         return float(np.clip(dist, 0.0, self.max_detect_dist))
 
     def _on_image(self, msg: CompressedImage):
@@ -71,7 +64,7 @@ class GroundScannerNode(Node):
         cv2.circle(mask_circle, center, radius, 255, -1)
         
         # --- 切除畫面最底部（車體陰影區與黑邊） ---
-        bottom_crop_y = int(h / 2 + radius) - 40
+        bottom_crop_y = int(h / 2 + radius) - 60  # 擴大裁切範圍，徹底避開邊緣 0.05m 的雜訊
         if bottom_crop_y < h:
             mask_circle[bottom_crop_y:, :] = 0
 
@@ -97,8 +90,9 @@ class GroundScannerNode(Node):
         floor_mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
 
         # === 新增：建立紫紅色干擾遮罩 ===
-        lower_purple = np.array([135, 50, 50])
-        upper_purple = np.array([165, 255, 255])
+        # 大幅放寬紫色的認定範圍，涵蓋所有偏紫/粉紅的顏色
+        lower_purple = np.array([120, 30, 30])
+        upper_purple = np.array([175, 255, 255])
         purple_mask = cv2.inRange(hsv_frame, lower_purple, upper_purple)
 
         # 將紫紅色遮罩「聯集 (OR)」加入地板遮罩中，強迫程式將紫色視為安全區域
@@ -119,11 +113,11 @@ class GroundScannerNode(Node):
         # 5. 生成 LaserScan 掃描資料
         scan = LaserScan()
         scan.header.stamp = msg.header.stamp
-        scan.header.frame_id = "camera_link"
+        scan.header.frame_id = "base_footprint"  # 修改為水平座標系，避免因 camera_link 傾斜 45 度導致訊號被當成地板以下而丟棄
         scan.angle_min = -self.hfov / 2.0
         scan.angle_max = self.hfov / 2.0
         scan.angle_increment = self.hfov / self.num_readings
-        scan.range_min = 0.05
+        scan.range_min = 0.10  # 忽略 10 公分以內的盲區 (車體邊緣/陰影)
         scan.range_max = self.max_detect_dist
 
         ranges = []
