@@ -7,7 +7,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, LaserScan
+from sensor_msgs.msg import CompressedImage, LaserScan
 
 class GroundScannerNode(Node):
     def __init__(self):
@@ -24,7 +24,7 @@ class GroundScannerNode(Node):
         self.max_detect_dist = 2.0
 
         # 建立影像訂閱與虛擬雷射發布
-        self.sub = self.create_subscription(Image, '/camera/image_raw', self._on_image, 10)
+        self.sub = self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self._on_image, 10)
         self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
         
         self.get_logger().info("GroundScannerNode (針對磨石子地磚優化版) 已就緒...")
@@ -55,9 +55,9 @@ class GroundScannerNode(Node):
         dist = self.cam_height * math.tan(angle_from_vertical)
         return float(np.clip(dist, 0.0, self.max_detect_dist))
 
-    def _on_image(self, msg: Image):
+    def _on_image(self, msg: CompressedImage):
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().error(f"cv_bridge 轉換失敗: {e}")
             return
