@@ -220,8 +220,8 @@
   <joint name="${namespace}camera_joint" type="fixed">
     <parent link="${namespace}base_link"/>
 	<child link="${namespace}camera_link"/>
-	<!-- 此處單位為弧度 0.785rad 為 45度-->
-    <origin xyz="0.04 0 0.13" rpy="0 0.785 0"/>
+	<!-- 此處為前向平視相機，無傾斜 -->
+    <origin xyz="0.04 0 0.13" rpy="0 0 0"/>
   </joint>
 
   <!-- Gazebo 相機外掛 -->
