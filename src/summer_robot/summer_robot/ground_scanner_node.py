@@ -81,11 +81,13 @@ class GroundScannerNode(Node):
             mask_circle[bottom_crop_y:, :] = 0
             
         # === 新增：切除畫面左右兩側邊緣 (縮窄相機視野) ===
-        # 魚眼相機兩側變形嚴重，且容易把側面的東西當成障礙物導致路徑膨脹後卡死
-        # 光達已經能完美看見兩側的椅腳，所以我們讓相機專心看「正前方 70%」就好 (左右各切除 15%)
-        crop_x = int(w * 0.15)
-        mask_circle[:, 0:crop_x] = 0
-        mask_circle[:, w - crop_x:] = 0
+        # 魚眼相機影像左右本身就有大約 90 像素的黑邊！
+        # 如果只切 15% (96像素) 幾乎只切到黑邊。我們改用「魚眼半徑」來切除外圍！
+        # 只保留魚眼正中間的 65% 視角 (左右各切除 17.5%)
+        crop_left = center[0] - int(radius * 0.65)
+        crop_right = center[0] + int(radius * 0.65)
+        mask_circle[:, :max(0, crop_left)] = 0
+        mask_circle[:, min(w, crop_right):] = 0
 
         # 2. 動態擷取「鏡頭正下方」的地板顏色 (避開被切除的底部陰影區)
         ref_y_end = bottom_crop_y - 5
