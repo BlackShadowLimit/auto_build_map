@@ -128,6 +128,10 @@ class GroundScannerNode(Node):
                 ranges.append(float('inf'))
 
         scan.ranges = ranges
+
+        if any(r < float('inf') for r in ranges):
+            self.get_logger().info("偵測到障礙物")
+
         self.scan_pub.publish(scan)
 
 def main(args=None):
