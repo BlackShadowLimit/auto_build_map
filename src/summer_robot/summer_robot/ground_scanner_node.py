@@ -7,12 +7,14 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan, CompressedImage
+from sensor_msgs.msg import LaserScan, Image
+from cv_bridge import CvBridge
 import threading
 
 class GroundScannerNode(Node):
     def __init__(self):
         super().__init__('ground_scanner_node')
+        self.bridge = CvBridge()
         
         # --- 使用者提供的額外資訊 ---
         self.cam_height = 0.15   # 相機離地高度 15 cm (0.15 m)
@@ -22,22 +24,14 @@ class GroundScannerNode(Node):
 
         # 直接發布 LaserScan
         self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
-        # 發布壓縮過的 Debug 影像，方便在 PC 端監控與除錯 (低頻寬消耗)
-        self.debug_pub = self.create_publisher(CompressedImage, '/camera_debug/compressed', 2)
+        # 發布低解析度的 Debug 影像，避免 rqt 的 image_transport 報錯
+        self.debug_pub = self.create_publisher(Image, '/camera_debug', 2)
         
-        # 開啟硬體攝影機 (強制使用 V4L2 避免 GStreamer 錯誤)
-        self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # 回復使用 ROS 訂閱：因為 OpenCV 直接讀取硬體在樹莓派上遇到 YUYV 格式或權限問題
+        # 由於這支程式和 camera_node 都跑在樹莓派上，訂閱 /camera/image_raw 是「本地傳輸」，完全不會佔用 Wi-Fi！
+        self.sub = self.create_subscription(Image, '/camera/image_raw', self._on_image, 10)
         
-        if not self.cap.isOpened():
-            self.get_logger().error("無法開啟硬體相機 /dev/video0！")
-        else:
-            self.get_logger().info("GroundScannerNode (硬體直讀極速版) 已就緒...")
-            # 開啟背景執行緒不斷擷取影像，避免阻塞 ROS spin
-            self.capture_thread = threading.Thread(target=self._capture_loop)
-            self.capture_thread.daemon = True
-            self.capture_thread.start()
+        self.get_logger().info("GroundScannerNode (樹莓派本地節點版) 已就緒...")
 
     def pixel_to_distance(self, y, h):
         """
@@ -58,20 +52,14 @@ class GroundScannerNode(Node):
         dist = self.cam_height / math.tan(angle_down_from_horizon)
         return float(np.clip(dist, 0.0, self.max_detect_dist))
 
-    def _capture_loop(self):
-        fail_count = 0
-        while rclpy.ok():
-            ret, frame = self.cap.read()
-            if not ret:
-                fail_count += 1
-                if fail_count % 30 == 0:
-                    self.get_logger().error(f"相機讀取失敗！(已失敗 {fail_count} 次)，請確認 /dev/video0 是否被佔用。")
-                continue
+    def _on_image(self, msg: Image):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().error(f"cv_bridge 轉換失敗: {e}")
+            return
             
-            fail_count = 0    
-            # 建立假的 Header 提供給 LaserScan
-            stamp = self.get_clock().now().to_msg()
-            self._process_frame(frame, stamp)
+        self._process_frame(frame, msg.header.stamp)
 
     def _process_frame(self, frame, stamp):
         h, w, _ = frame.shape
@@ -193,15 +181,14 @@ class GroundScannerNode(Node):
                 dist_str = f"{ranges[i]:.2f}m"
                 cv2.putText(debug_frame, dist_str, (x-15, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
         
-        # 編碼成 JPEG 壓縮影像
-        success, encoded_image = cv2.imencode('.jpg', debug_frame)
-        if success:
-            msg_img = CompressedImage()
-            msg_img.header.stamp = stamp
-            msg_img.header.frame_id = "camera_link"
-            msg_img.format = "jpeg"
-            msg_img.data = encoded_image.tobytes()
-            self.debug_pub.publish(msg_img)
+        # 縮小 Debug 影像解析度以節省 Wi-Fi 頻寬 (320x240)
+        debug_frame_small = cv2.resize(debug_frame, (320, 240))
+        
+        # 轉成一般 Image 發布，徹底避開 rqt_image_view 的 compressed 外掛報錯問題
+        msg_img = self.bridge.cv2_to_imgmsg(debug_frame_small, encoding="bgr8")
+        msg_img.header.stamp = stamp
+        msg_img.header.frame_id = "camera_link"
+        self.debug_pub.publish(msg_img)
 
 def main(args=None):
     rclpy.init(args=args)
