@@ -79,6 +79,13 @@ class GroundScannerNode(Node):
         bottom_crop_y = int(h / 2 + radius) - 60
         if bottom_crop_y < h:
             mask_circle[bottom_crop_y:, :] = 0
+            
+        # === 新增：切除畫面左右兩側邊緣 (縮窄相機視野) ===
+        # 魚眼相機兩側變形嚴重，且容易把側面的東西當成障礙物導致路徑膨脹後卡死
+        # 光達已經能完美看見兩側的椅腳，所以我們讓相機專心看「正前方 70%」就好 (左右各切除 15%)
+        crop_x = int(w * 0.15)
+        mask_circle[:, 0:crop_x] = 0
+        mask_circle[:, w - crop_x:] = 0
 
         # 2. 動態擷取「鏡頭正下方」的地板顏色 (避開被切除的底部陰影區)
         ref_y_end = bottom_crop_y - 5
