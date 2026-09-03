@@ -10,6 +10,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Image
 from cv_bridge import CvBridge
 import threading
+import collections
 
 class GroundScannerNode(Node):
     def __init__(self):
@@ -21,6 +22,9 @@ class GroundScannerNode(Node):
         self.hfov = 2.09         # 水平視角 (約120度)
         self.num_readings = 60   # 輸出的雷射射線數量
         self.max_detect_dist = 2.0
+        
+        # 時空防閃爍濾波器：追蹤最近 5 幀的障礙物狀態
+        self.obs_history = collections.deque(maxlen=5)
 
         # 直接發布 LaserScan
         self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
@@ -125,8 +129,8 @@ class GroundScannerNode(Node):
         # 依照您的要求，將閉合運算 (Close) 縮小，避免過度膨脹吃到真實障礙物的邊界
         kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
         kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-        # 閉運算：將地板中的磁磚接縫、黑洞(斑點)填滿 (維持 iterations=3)
-        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_CLOSE, kernel_close, iterations=3)
+        # 閉運算：將地板中的磁磚接縫、黑洞(斑點)填滿 (從 iterations=3 降為 1，避免真實小障礙物被抹除)
+        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
         # 開運算：消除散落的雜訊
         floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
 
@@ -140,13 +144,16 @@ class GroundScannerNode(Node):
         scan.range_min = 0.10  # 忽略 10 公分以內的盲區 (車體邊緣/陰影)
         scan.range_max = self.max_detect_dist
 
-        ranges = []
-        obstacle_pixels = []
+        raw_ranges = []
+        raw_pixels = []
         col_step = w // self.num_readings
 
         for i in range(self.num_readings):
             strip = floor_mask[:, i * col_step:(i + 1) * col_step]
-            col_profile = np.max(strip, axis=1) # 將該區塊水平壓縮成一條線
+            # ★ 關鍵修正：將 np.max 改為 np.min
+            # 原本 np.max 會導致「只要 strip 裡有 1 個地板像素，整條都被當成地板」，直接忽略細小的桌腳。
+            # 改為 np.min 後：「只要 strip 裡有 1 個障礙物像素(0)，這條就被視為障礙物」。
+            col_profile = np.min(strip, axis=1) 
             
             strip_valid = mask_circle[:, i * col_step:(i + 1) * col_step]
             col_valid = np.max(strip_valid, axis=1) # 檢查是否在有效視角內
@@ -161,15 +168,48 @@ class GroundScannerNode(Node):
                     
             if obstacle_y != -1:
                 dist = self.pixel_to_distance(obstacle_y, h)
-                ranges.append(dist)
-                obstacle_pixels.append((int((i + 0.5) * col_step), obstacle_y))
+                raw_ranges.append(dist)
+                raw_pixels.append((int((i + 0.5) * col_step), obstacle_y))
             else:
-                ranges.append(float('inf'))
-                obstacle_pixels.append(None)
+                raw_ranges.append(float('inf'))
+                raw_pixels.append(None)
 
-        scan.ranges = ranges
+        # --- 時空防閃爍濾波器 (Spatio-Temporal Flicker Filter) ---
+        # 將目前的障礙物布林陣列存入歷史紀錄
+        current_obs = [r != float('inf') for r in raw_ranges]
+        self.obs_history.append(current_obs)
+        
+        filtered_ranges = []
+        
+        # 只有當歷史紀錄累積夠多時才開始濾波，否則直接放行
+        if len(self.obs_history) < self.obs_history.maxlen:
+            filtered_ranges = raw_ranges
+        else:
+            for i in range(self.num_readings):
+                if raw_ranges[i] == float('inf'):
+                    filtered_ranges.append(float('inf'))
+                else:
+                    # 檢查過去 N 幀中，該射線的「附近區域 (i-3 到 i+3)」是否持續存在障礙物
+                    # 這能確保即使機器人旋轉導致障礙物在畫面中平移，也能被正確追蹤
+                    consistent_count = 0
+                    for past_obs in self.obs_history:
+                        start_idx = max(0, i - 3)
+                        end_idx = min(self.num_readings, i + 4)
+                        if any(past_obs[start_idx:end_idx]):
+                            consistent_count += 1
+                            
+                    # 在 5 幀歷史中，至少要有 3 幀 (包含現在這幀) 看到障礙物，才認為是真實的
+                    if consistent_count >= 3:
+                        filtered_ranges.append(raw_ranges[i])
+                    else:
+                        filtered_ranges.append(float('inf'))
+                        # 若被濾除，也可以把 Debug 圖上的紅點拔掉 (可選)
+                        raw_pixels[i] = None
 
-        valid_ranges = [r for r in ranges if r < float('inf')]
+        scan.ranges = filtered_ranges
+        obstacle_pixels = raw_pixels
+
+        valid_ranges = [r for r in filtered_ranges if r < float('inf')]
         if valid_ranges:
             min_dist = min(valid_ranges)
             self.get_logger().info(f"偵測到障礙物，最近距離: {min_dist:.2f} 公尺")
