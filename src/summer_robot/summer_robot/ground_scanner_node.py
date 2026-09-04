@@ -150,19 +150,18 @@ class GroundScannerNode(Node):
 
         for i in range(self.num_readings):
             strip = floor_mask[:, i * col_step:(i + 1) * col_step]
-            # ★ 關鍵修正：將 np.max 改為 np.min
-            # 原本 np.max 會導致「只要 strip 裡有 1 個地板像素，整條都被當成地板」，直接忽略細小的桌腳。
-            # 改為 np.min 後：「只要 strip 裡有 1 個障礙物像素(0)，這條就被視為障礙物」。
-            col_profile = np.min(strip, axis=1) 
-            
             strip_valid = mask_circle[:, i * col_step:(i + 1) * col_step]
-            col_valid = np.max(strip_valid, axis=1) # 檢查是否在有效視角內
             
-            # 從畫面底部 (離車體最近) 往上 (遠處) 尋找第一個「非地板 (0)」的像素
+            # 新邏輯：只有在「有效視角內 (strip_valid > 0)」且「非地板 (strip == 0)」的像素，才是真障礙物
+            is_obstacle_pixel = (strip_valid > 0) & (strip == 0)
+            
+            # 只要這一列 (y) 有任何一個 pixel 是真障礙物，這列就被判定為有障礙物
+            row_has_obstacle = np.any(is_obstacle_pixel, axis=1)
+            
+            # 從畫面底部 (離車體最近) 往上 (遠處) 尋找第一個有障礙物的像素
             obstacle_y = -1
             for y in range(h - 1, h // 2, -1):
-                # 必須在有效範圍內 (col_valid > 0) 且偵測到非地板 (col_profile == 0)
-                if col_valid[y] > 0 and col_profile[y] == 0:
+                if row_has_obstacle[y]:
                     obstacle_y = y
                     break
                     
