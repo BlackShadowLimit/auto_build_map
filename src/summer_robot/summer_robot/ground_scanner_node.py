@@ -231,7 +231,7 @@ class GroundScannerNode(Node):
             if pt is not None:
                 x, y = pt
                 cv2.circle(debug_frame, (x, y), 5, (0, 0, 255), -1)
-                dist_str = f"{ranges[i]:.2f}m"
+                dist_str = f"{filtered_ranges[i]:.2f}m"
                 cv2.putText(debug_frame, dist_str, (x-15, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
         
         # 縮小 Debug 影像解析度以節省 Wi-Fi 頻寬 (320x240)
