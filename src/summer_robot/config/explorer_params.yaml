@@ -1,0 +1,7 @@
+explorer_node:
+  ros__parameters:
+    min_size: 6              # 稍微縮小，窄道開口的邊界才抓得到
+    search_radius: 600
+    ignore_radius: 0.6       # 走過或到不了的區域黑名單範圍放大
+    inflation_radius: 0.25
+    decision_rate: 2.0       # 改成 2.0 Hz（每 0.5 秒決策一次），實現邊走邊連貫決策

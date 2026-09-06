@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import math
+import cv2
+from cv_bridge import CvBridge
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan, Image
+from cv_bridge import CvBridge
+import threading
+import collections
+
+class GroundScannerNode(Node):
+    def __init__(self):
+        super().__init__('ground_scanner_node')
+        self.bridge = CvBridge()
+        
+        # --- 使用者提供的額外資訊 ---
+        self.cam_height = 0.15   # 相機離地高度 15 cm (0.15 m)
+        self.hfov = 2.09         # 水平視角 (約120度)
+        self.num_readings = 60   # 輸出的雷射射線數量
+        self.max_detect_dist = 2.0
+        
+        # 時空防閃爍濾波器：追蹤最近 5 幀的障礙物狀態
+        self.obs_history = collections.deque(maxlen=5)
+
+        # 直接發布 LaserScan
+        self.scan_pub = self.create_publisher(LaserScan, '/camera_scan', 10)
+        # 發布低解析度的 Debug 影像，避免 rqt 的 image_transport 報錯
+        self.debug_pub = self.create_publisher(Image, '/camera_debug', 2)
+        
+        # 回復使用 ROS 訂閱：因為 OpenCV 直接讀取硬體在樹莓派上遇到 YUYV 格式或權限問題
+        # 由於這支程式和 camera_node 都跑在樹莓派上，訂閱 /camera/image_raw 是「本地傳輸」，完全不會佔用 Wi-Fi！
+        self.sub = self.create_subscription(Image, '/camera/image_raw', self._on_image, 10)
+        
+        self.get_logger().info("GroundScannerNode (樹莓派本地節點版) 已就緒...")
+
+    def pixel_to_distance(self, y, h):
+        """
+        將影像 y 座標轉換為前方物理距離 (m)。
+        前向相機模型：畫面正中心 (h/2) 為地平線 (無限遠)。
+        """
+        pixel_dy = y - (h / 2.0)
+        
+        # 如果像素在畫面上半部或正中心，代表看向上方或地平線，距離無限遠
+        if pixel_dy <= 0:
+            return float('inf')
+            
+        # 假設垂直視角為 90 度 (vfov = 1.5708 rad)，從中心到最底部的角度為 vfov/2
+        vfov = 1.5708
+        angle_down_from_horizon = (pixel_dy / (h / 2.0)) * (vfov / 2.0)
+        
+        # 距離 = 相機高度 / tan(俯角)
+        dist = self.cam_height / math.tan(angle_down_from_horizon)
+        return float(np.clip(dist, 0.0, self.max_detect_dist))
+
+    def _on_image(self, msg: Image):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().error(f"cv_bridge 轉換失敗: {e}")
+            return
+            
+        self._process_frame(frame, msg.header.stamp)
+
+    def _process_frame(self, frame, stamp):
+        h, w, _ = frame.shape
+        
+        # 1. 魚眼邊界遮罩 (過濾圓形以外的無效黑邊)
+        mask_circle = np.zeros((h, w), dtype=np.uint8)
+        center = (w // 2, h // 2)
+        radius = int(min(h, w) * 0.48)
+        cv2.circle(mask_circle, center, radius, 255, -1)
+        
+        # --- 裁切畫面：只專注於下半部的真實地板 ---
+        # 根據您提供的截圖，天花板和牆壁被誤認為地板。我們直接將畫面中線 (h*0.55) 以上的區域全部塗黑忽略！
+        horizon_y = int(h * 0.55)
+        mask_circle[0:horizon_y, :] = 0
+        
+        # --- 切除畫面最底部（車體陰影區與黑邊） ---
+        bottom_crop_y = int(h / 2 + radius) - 60
+        if bottom_crop_y < h:
+            mask_circle[bottom_crop_y:, :] = 0
+            
+        # === 新增：切除畫面左右兩側邊緣 (縮窄相機視野) ===
+        # 魚眼相機影像左右本身就有大約 90 像素的黑邊！
+        # 如果只切 15% (96像素) 幾乎只切到黑邊。我們改用「魚眼半徑」來切除外圍！
+        # 只保留魚眼正中間的 65% 視角 (左右各切除 17.5%)
+        crop_left = center[0] - int(radius * 0.65)
+        crop_right = center[0] + int(radius * 0.65)
+        mask_circle[:, :max(0, crop_left)] = 0
+        mask_circle[:, min(w, crop_right):] = 0
+
+        # 2. 動態擷取「鏡頭正下方」的地板顏色 (避開被切除的底部陰影區)
+        ref_y_end = bottom_crop_y - 5
+        ref_y_start = ref_y_end - 25
+        ref_roi = frame[ref_y_start:ref_y_end, w//2-30:w//2+30]
+        ref_hsv = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2HSV)
+        
+        median_h = int(np.median(ref_hsv[:, :, 0]))
+        median_s = int(np.median(ref_hsv[:, :, 1]))
+        median_v = int(np.median(ref_hsv[:, :, 2]))
+
+        # 3. HSV 色彩空間分割
+        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # 放寬標準：容忍更大的顏色與亮度變化 (陰影通常會讓亮度 V 下降、飽和度 S 改變)
+        lower_bound = np.array([max(0, median_h - 35), max(0, median_s - 60), max(0, median_v - 150)], dtype=np.int32)
+        upper_bound = np.array([min(179, median_h + 35), min(255, median_s + 80), min(255, median_v + 80)], dtype=np.int32)
+        
+        # 產生「是地板」的二值化遮罩
+        floor_mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
+
+        # === 新增：建立紫紅色干擾遮罩 ===
+        # 大幅放寬紫色的認定範圍，涵蓋所有偏紫/粉紅的顏色
+        lower_purple = np.array([120, 30, 30])
+        upper_purple = np.array([175, 255, 255])
+        purple_mask = cv2.inRange(hsv_frame, lower_purple, upper_purple)
+
+        # 將紫紅色遮罩「聯集 (OR)」加入地板遮罩中，強迫程式將紫色視為安全區域
+        floor_mask = cv2.bitwise_or(floor_mask, purple_mask)
+        
+        # 最後再套用魚眼邊界遮罩，濾除圓形外的黑邊
+        floor_mask = cv2.bitwise_and(floor_mask, mask_circle)
+
+        # 4. 形態學處理：消除磨石子黑斑造成的偽障礙物破洞
+        # 依照您的要求，將閉合運算 (Close) 縮小，避免過度膨脹吃到真實障礙物的邊界
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        # 閉運算：將地板中的磁磚接縫、黑洞(斑點)填滿 (從 iterations=3 降為 1，避免真實小障礙物被抹除)
+        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+        # 開運算：消除散落的雜訊
+        floor_mask = cv2.morphologyEx(floor_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
+
+        # 5. 生成 LaserScan 掃描資料
+        scan = LaserScan()
+        scan.header.stamp = stamp
+        scan.header.frame_id = "base_footprint"  # 修改為水平座標系，避免因 camera_link 傾斜 45 度導致訊號被當成地板以下而丟棄
+        scan.angle_min = -self.hfov / 2.0
+        scan.angle_max = self.hfov / 2.0
+        scan.angle_increment = self.hfov / self.num_readings
+        scan.range_min = 0.10  # 忽略 10 公分以內的盲區 (車體邊緣/陰影)
+        scan.range_max = self.max_detect_dist
+
+        raw_ranges = []
+        raw_pixels = []
+        col_step = w // self.num_readings
+
+        for i in range(self.num_readings):
+            strip = floor_mask[:, i * col_step:(i + 1) * col_step]
+            strip_valid = mask_circle[:, i * col_step:(i + 1) * col_step]
+            
+            # 新邏輯：只有在「有效視角內 (strip_valid > 0)」且「非地板 (strip == 0)」的像素，才是真障礙物
+            is_obstacle_pixel = (strip_valid > 0) & (strip == 0)
+            
+            # 只要這一列 (y) 有任何一個 pixel 是真障礙物，這列就被判定為有障礙物
+            row_has_obstacle = np.any(is_obstacle_pixel, axis=1)
+            
+            # 從畫面底部 (離車體最近) 往上 (遠處) 尋找第一個有障礙物的像素
+            obstacle_y = -1
+            for y in range(h - 1, h // 2, -1):
+                if row_has_obstacle[y]:
+                    obstacle_y = y
+                    break
+                    
+            if obstacle_y != -1:
+                dist = self.pixel_to_distance(obstacle_y, h)
+                raw_ranges.append(dist)
+                raw_pixels.append((int((i + 0.5) * col_step), obstacle_y))
+            else:
+                raw_ranges.append(float('inf'))
+                raw_pixels.append(None)
+
+        # --- 時空防閃爍濾波器 (Spatio-Temporal Flicker Filter) ---
+        # 將目前的障礙物布林陣列存入歷史紀錄
+        current_obs = [r != float('inf') for r in raw_ranges]
+        self.obs_history.append(current_obs)
+        
+        filtered_ranges = []
+        
+        # 只有當歷史紀錄累積夠多時才開始濾波，否則直接放行
+        if len(self.obs_history) < self.obs_history.maxlen:
+            filtered_ranges = raw_ranges
+        else:
+            for i in range(self.num_readings):
+                if raw_ranges[i] == float('inf'):
+                    filtered_ranges.append(float('inf'))
+                else:
+                    # 檢查過去 N 幀中，該射線的「附近區域 (i-3 到 i+3)」是否持續存在障礙物
+                    # 這能確保即使機器人旋轉導致障礙物在畫面中平移，也能被正確追蹤
+                    consistent_count = 0
+                    for past_obs in self.obs_history:
+                        start_idx = max(0, i - 3)
+                        end_idx = min(self.num_readings, i + 4)
+                        if any(past_obs[start_idx:end_idx]):
+                            consistent_count += 1
+                            
+                    # 在 5 幀歷史中，至少要有 3 幀 (包含現在這幀) 看到障礙物，才認為是真實的
+                    if consistent_count >= 3:
+                        filtered_ranges.append(raw_ranges[i])
+                    else:
+                        filtered_ranges.append(float('inf'))
+                        # 若被濾除，也可以把 Debug 圖上的紅點拔掉 (可選)
+                        raw_pixels[i] = None
+
+        scan.ranges = filtered_ranges
+        obstacle_pixels = raw_pixels
+
+        valid_ranges = [r for r in filtered_ranges if r < float('inf')]
+        if valid_ranges:
+            min_dist = min(valid_ranges)
+            self.get_logger().info(f"偵測到障礙物，最近距離: {min_dist:.2f} 公尺")
+
+        self.scan_pub.publish(scan)
+
+        # 6. 生成並發布 Debug 影像 (僅當有人訂閱時，或直接發送以利 RViz 隨時查看)
+        # 繪製半透明的綠色遮罩代表「被判定為地板的安全區域」
+        debug_frame = frame.copy()
+        
+        # 使用 OpenCV 安全的方法繪製半透明遮罩
+        green_overlay = np.zeros_like(debug_frame)
+        green_overlay[:] = (0, 255, 0)
+        mask_bool = floor_mask > 0
+        debug_frame[mask_bool] = cv2.addWeighted(debug_frame[mask_bool], 0.6, green_overlay[mask_bool], 0.4, 0)
+        
+        # 畫出障礙物的掃描紅點與距離
+        for i, pt in enumerate(obstacle_pixels):
+            if pt is not None:
+                x, y = pt
+                cv2.circle(debug_frame, (x, y), 5, (0, 0, 255), -1)
+                dist_str = f"{filtered_ranges[i]:.2f}m"
+                cv2.putText(debug_frame, dist_str, (x-15, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        
+        # 縮小 Debug 影像解析度以節省 Wi-Fi 頻寬 (320x240)
+        debug_frame_small = cv2.resize(debug_frame, (320, 240))
+        
+        # 轉成一般 Image 發布，徹底避開 rqt_image_view 的 compressed 外掛報錯問題
+        msg_img = self.bridge.cv2_to_imgmsg(debug_frame_small, encoding="bgr8")
+        msg_img.header.stamp = stamp
+        msg_img.header.frame_id = "camera_link"
+        self.debug_pub.publish(msg_img)
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GroundScannerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
